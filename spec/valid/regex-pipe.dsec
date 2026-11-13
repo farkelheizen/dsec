@@ -1,0 +1,3 @@
+# @schema: dsec/v1
+note | A regex alternation may contain a literal pipe.
+var | MODE | str/(dev|test|prod)/ | project/app | dev | Runtime mode

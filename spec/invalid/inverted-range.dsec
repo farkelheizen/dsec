@@ -1,0 +1,2 @@
+# @schema: dsec/v1
+var | INVALID_PORT | int[100..1] | project/app | 20 | Invalid bounds

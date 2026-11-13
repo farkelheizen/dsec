@@ -1,0 +1,5 @@
+# @schema: dsec/v1
+note | Portable conformance fixture.
+wildcard | deny | Require declarations for new overrides.
+const | SERVICE_NAME | demo-service | Service identifier
+mutate | SERVICE_LABEL | {{SERVICE_NAME}}-local | Local label

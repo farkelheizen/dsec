@@ -1,0 +1,2 @@
+# @schema: dsec/v1
+var | INVALID_PORT | int[1..3] | project/app | 20 | Default outside bounds

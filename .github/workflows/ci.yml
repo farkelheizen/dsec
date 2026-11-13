@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Zsh syntax
+        run: zsh -n dsec dsec.plugin.zsh tests/test-cli.zsh tests/test-spec.zsh tests/test-integration.zsh
+      - name: Check whitespace
+        run: git diff --check
+      - name: Run CLI tests
+        run: zsh tests/test-cli.zsh
+      - name: Run specification fixtures
+        run: zsh tests/test-spec.zsh
+      - name: Run isolated Keychain integration
+        run: zsh tests/test-integration.zsh

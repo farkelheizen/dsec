@@ -1,6 +1,5 @@
 # @schema: dsec/v1
 note | MYAPP configuration for {{ENV}}.
-wildcard | deny | Require explicit variable declarations.
 const | MYAPP_ENV | {{ENV}} | Environment name
 secret | MYAPP_GOOGLE_CLIENT_SECRET | str | myapp-{{ENV}}-google-client-secret | Google OAuth client secret
 secret | MYAPP_MCP_SIGNING_KEY | str | myapp-{{ENV}}-mcp-signing-key | MCP signing key

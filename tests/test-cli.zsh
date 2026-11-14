@@ -111,12 +111,10 @@ print -rn -- 'synthetic-secret-value' > "$KCH_MOCK_STORE/db-password"
 cat > "$TMP/main.dsec" <<'EOF'
 # @schema: dsec/v1
 note | Synthetic integration profile.
-wildcard | allow | Allow explicit local overrides
-include | project/base | req | Base values
+source | project/base | req | Base values
 var | PORT | int[1024..65535] | project/app | 5432 | Database port
 secret | DB_PASSWORD | str? | db-password | Database password
 const | SCHEME | postgres | URI scheme
-mutate | DATABASE_URL | {{SCHEME}}://{{DB_PASSWORD}}@{{HOST}}:{{PORT}}/db | Database URI
 EOF
 
 init_output=$("$ROOT/dsec" init main "$TMP/main.dsec" 2>&1)
@@ -125,17 +123,18 @@ init_status=$?
 assert_status 'init creates a validated profile' 0 "$init_status"
 
 inspect=$("$ROOT/dsec" inspect main --check 2>&1)
-assert 'inspect check resolves profile' contains "$inspect" 'DATABASE_URL'
-assert 'inspect masks secret-derived mutations' contains "$inspect" '********'
+assert 'inspect reports a single profile header' contains "$inspect" 'Profile: main'
+assert 'inspect check resolves profile' contains "$inspect" 'DB_PASSWORD'
+assert 'inspect masks secret values' contains "$inspect" '********'
 assert 'inspect does not reveal the synthetic secret' not_contains "$inspect" 'synthetic-secret-value'
 
 revealed=$("$ROOT/dsec" inspect main --reveal 2>&1)
 [[ $revealed == *'EXPORTED VARIABLE'* ]] || print -u2 -r -- "reveal output: $revealed"
 assert 'reveal is explicit' contains "$revealed" 'synthetic-secret-value'
 
-run_output=$("$ROOT/dsec" run main -o PORT=6000 -- /usr/bin/env 2>/dev/null)
-assert 'run override reaches only the child process' contains "$run_output" 'PORT=6000'
-assert 'mutations are recomputed after overrides' contains "$run_output" 'DATABASE_URL=postgres://synthetic-secret-value@db.example.test:6000/db'
+run_output=$("$ROOT/dsec" run main -- /usr/bin/env 2>/dev/null)
+assert 'run exports declared variable values' contains "$run_output" 'PORT=5433'
+assert 'run exports declared constants' contains "$run_output" 'SCHEME=postgres'
 
 set_output=$("$ROOT/dsec" set main PORT 6001 2>&1)
 [[ $set_output == *'Set PORT'* ]] || print -u2 -r -- "set output: $set_output"
@@ -146,68 +145,57 @@ assert_status 'set safely updates a static scope assignment' 0 $?
 cat > "$TMP/phases.dsec" <<'EOF'
 # @schema: dsec/v1
 var | ORDERED | str | project/app | fallback | Explicit variable phase wins
-include | project/order | req | Included defaults
+source | project/order | req | Source defaults
 const | ORDERED_CONST | final | Constant phase wins
 EOF
 "$ROOT/dsec" init phases "$TMP/phases.dsec" >/dev/null 2>&1
 phase_output=$("$ROOT/dsec" run phases -- /usr/bin/env 2>/dev/null)
-assert 'resolution applies includes before explicit variables and constants' contains "$phase_output" 'ORDERED=stored'
-assert 'constants apply after includes' contains "$phase_output" 'ORDERED_CONST=final'
+assert 'resolution applies source values before explicit variables and constants' contains "$phase_output" 'ORDERED=stored'
+assert 'constants apply after source values' contains "$phase_output" 'ORDERED_CONST=final'
 forwarded=$("$ROOT/dsec" run main -- /usr/bin/printf '%s|%s' 'a b' 'c;d' 2>/dev/null)
 assert 'run preserves child argument boundaries' contains "$forwarded" 'a b|c;d'
 child_status=0
 "$ROOT/dsec" run main -- /bin/sh -c 'exit 37' >/dev/null 2>&1 || child_status=$?
 assert_status 'run propagates the child exit status' 37 "$child_status"
 
-cat > "$TMP/stack-one.dsec" <<'EOF'
-# @schema: dsec/v1
-const | STACKED | first | Earlier value
-EOF
-cat > "$TMP/stack-two.dsec" <<'EOF'
-# @schema: dsec/v1
-const | STACKED | second | Later value
-EOF
-"$ROOT/dsec" init stack-one "$TMP/stack-one.dsec" >/dev/null 2>&1
-"$ROOT/dsec" init stack-two "$TMP/stack-two.dsec" >/dev/null 2>&1
-stacked=$("$ROOT/dsec" inspect stack-one stack-two 2>&1)
-assert 'later stacked profile wins and reports shadow provenance' contains "$stacked" 'stack-two/const <- stack-one/const'
-assert 'stacked profile exposes the winning value' contains "$stacked" 'second'
+multi_run_status=0
+"$ROOT/dsec" run main phases -- /usr/bin/true >/dev/null 2>&1 || multi_run_status=$?
+assert_status 'run rejects multiple profiles' 1 "$multi_run_status"
+multi_inspect_status=0
+"$ROOT/dsec" inspect main phases >/dev/null 2>&1 || multi_inspect_status=$?
+assert_status 'inspect rejects multiple profiles' 1 "$multi_inspect_status"
+multi_export_status=0
+"$ROOT/dsec" export main phases >/dev/null 2>&1 || multi_export_status=$?
+assert_status 'export rejects multiple profiles' 1 "$multi_export_status"
 
-cat > "$TMP/missing-mutation.dsec" <<'EOF'
-# @schema: dsec/v1
-mutate | MISSING_RESULT | {{NOT_DECLARED}} | Missing reference
-EOF
-"$ROOT/dsec" init missing-mutation "$TMP/missing-mutation.dsec" >/dev/null 2>&1
-missing_status=0
-"$ROOT/dsec" run missing-mutation -- /usr/bin/true >/dev/null 2>&1 || missing_status=$?
-assert_status 'missing mutation references fail validation' 2 "$missing_status"
-cat > "$TMP/cyclic-mutation.dsec" <<'EOF'
-# @schema: dsec/v1
-mutate | CYCLE_A | {{CYCLE_B}} | Cycle A
-mutate | CYCLE_B | {{CYCLE_A}} | Cycle B
-EOF
-"$ROOT/dsec" init cyclic-mutation "$TMP/cyclic-mutation.dsec" >/dev/null 2>&1
-cycle_status=0
-"$ROOT/dsec" run cyclic-mutation -- /usr/bin/true >/dev/null 2>&1 || cycle_status=$?
-assert_status 'mutation dependency cycles fail validation' 2 "$cycle_status"
+run_override_status=0
+"$ROOT/dsec" run main -o PORT=6000 -- /usr/bin/true >/dev/null 2>&1 || run_override_status=$?
+assert_status 'run rejects removed -o option' 1 "$run_override_status"
+run_sha_status=0
+"$ROOT/dsec" run main --require-sha deadbeef -- /usr/bin/true >/dev/null 2>&1 || run_sha_status=$?
+assert_status 'run rejects removed --require-sha option' 1 "$run_sha_status"
+export_override_status=0
+"$ROOT/dsec" export main -o PORT=6000 >/dev/null 2>&1 || export_override_status=$?
+assert_status 'export rejects removed -o option' 1 "$export_override_status"
 
 cat > "$TMP/template.dsec" <<'EOF'
 # @schema: dsec/v1
 # @template_id: service-{{ENV}}
 note | Configured for {{ENV}}.
-include | project/{{ENV}} | req | Environment values
+source | project/{{ENV}} | req | Environment values
 const | LABEL | {{CUSTOM}} | Local label
-mutate | DYNAMIC_LABEL | {{CUSTOM}}/{{RUNTIME}} | Runtime interpolation
+var | RUNTIME | str | project/{{ENV}} | | Runtime interpolation
 EOF
 template_init=$("$ROOT/dsec" init templated "$TMP/template.dsec" --env dev --var 'CUSTOM=left|right' 2>&1)
 template_init_status=$?
 (( template_init_status == 0 )) || print -u2 -r -- "$template_init"
 assert_status 'template placeholders accept explicit values containing delimiters' 0 "$template_init_status"
 template_run=$("$ROOT/dsec" run templated -- /usr/bin/env 2>/dev/null)
-assert 'runtime placeholders survive template initialization' contains "$template_run" 'DYNAMIC_LABEL=left|right/runtime-value'
+assert 'template constants resolve explicit placeholder values' contains "$template_run" 'LABEL=left|right'
+assert 'template profile resolves runtime values from source scope' contains "$template_run" 'RUNTIME=runtime-value'
 template_export=$("$ROOT/dsec" export-template templated 2>&1)
 assert 'template export restores literal placeholders and metadata' contains "$template_export" '@template_id: service-{{ENV}}'
-assert 'template export restores source placeholder directives' contains "$template_export" 'include | project/{{ENV}}'
+assert 'template export restores source placeholder directives' contains "$template_export" 'source | project/{{ENV}}'
 [[ $(/usr/bin/grep '^# @vars:' "$DSEC_HOME/profiles/templated.dsec") == *'CUSTOM=left\|right'* ]]
 assert_status 'substitution metadata escapes separators' 0 $?
 cat > "$ENVC_CONFIG_DIR/project/prod.env" <<'EOF'
@@ -218,7 +206,8 @@ reinit_status=$?
 (( reinit_status == 0 )) || print -u2 -r -- "$reinit_output"
 assert_status 'reinitialization restores stored placeholder mappings' 0 "$reinit_status"
 reinit_run=$("$ROOT/dsec" run templated -- /usr/bin/env 2>/dev/null)
-assert 'reinitialization applies new explicit values and preserves prior mappings' contains "$reinit_run" 'DYNAMIC_LABEL=left|right/prod-value'
+assert 'reinitialization applies new source values for templated variables' contains "$reinit_run" 'RUNTIME=prod-value'
+assert 'reinitialization preserves explicit placeholder mappings' contains "$reinit_run" 'LABEL=left|right'
 
 mkdir -p "$ENVC_CONFIG_DIR/myapp"
 for environment in dev test; do
@@ -251,7 +240,7 @@ EOF
 done
 
 template=$("$ROOT/dsec" export-template main 2>&1)
-assert 'template export restores the source manifest' contains "$template" 'mutate | DATABASE_URL | {{SCHEME}}'
+assert 'template export restores the source manifest' contains "$template" 'source | project/base | req | Base values'
 assert 'template export contains no secret value' not_contains "$template" 'synthetic-secret-value'
 
 docs=$("$ROOT/dsec" docs main 2>&1)
@@ -260,6 +249,9 @@ assert 'docs includes typed variables' contains "$docs" '| `PORT` | var | `int[1
 assert 'docs provides a quickstart' contains "$docs" 'dsec init main'
 completion_script=$("$ROOT/dsec" completions 2>&1)
 assert 'completion output covers options and child-command completion' contains "$completion_script" '_normal'
+assert 'completion output omits removed run SHA option' not_contains "$completion_script" '--require-sha'
+assert 'completion output omits removed set scope option' not_contains "$completion_script" '--scope'
+assert 'completion output omits removed set secret option' not_contains "$completion_script" '--secret'
 print -r -- "$completion_script" | zsh -n
 assert_status 'generated completion code is valid Zsh' 0 $?
 completion_variables=$("$ROOT/dsec" __complete_variables main 2>&1)
@@ -277,7 +269,6 @@ assert_status 'malformed init has no profile side effect' 0 $?
 
 cat > "$TMP/regex.dsec" <<'EOF'
 # @schema: dsec/v1
-wildcard | deny | No arbitrary overrides
 secret | REGEX_VALUE | str/^sk_(test|live)_.+/ | regex-alias | Regex pipe
 EOF
 print -rn -- 'sk_test_demo' > "$KCH_MOCK_STORE/regex-alias"
@@ -285,24 +276,36 @@ print -rn -- 'sk_test_demo' > "$KCH_MOCK_STORE/regex-alias"
 [[ $? == 0 ]] || "$ROOT/dsec" init regex "$TMP/regex.dsec"
 assert_status 'regex alternation pipes are parsed as part of the type' 0 $?
 
-cat > "$TMP/deny.dsec" <<'EOF'
+cat > "$TMP/legacy-include.dsec" <<'EOF'
 # @schema: dsec/v1
-wildcard | deny | Strict override policy
 include | project/base | req | Included undeclared values remain allowed
 EOF
-"$ROOT/dsec" init deny "$TMP/deny.dsec" >/dev/null 2>&1
-deny_run=$("$ROOT/dsec" run deny -o EXTRA_FLAG=x -- /usr/bin/true 2>&1)
-assert_status 'wildcard deny rejects undeclared CLI overrides' 2 $?
-allow_run=$("$ROOT/dsec" run deny -- /usr/bin/env 2>/dev/null)
-assert 'include variables are exempt from wildcard restrictions' contains "$allow_run" 'HOST=db.example.test'
-deny_set_status=0
-"$ROOT/dsec" set deny UNDECLARED value --scope extra/deny >/dev/null 2>&1 || deny_set_status=$?
-assert_status 'wildcard deny rejects undeclared set values' 2 "$deny_set_status"
-allow_set=$("$ROOT/dsec" set main ADDED_SETTING synthetic-value --scope extra/added 2>&1)
-[[ $allow_set == *'Set ADDED_SETTING'* ]] || print -u2 -r -- "wildcard set output: $allow_set"
-assert 'wildcard allow requires and honors an explicit set route' contains "$allow_set" 'Set ADDED_SETTING'
-grep -q '^var | ADDED_SETTING | str | extra/added | | Added via dsec set$' "$DSEC_HOME/profiles/main.dsec"
-assert_status 'wildcard set records the declared storage route' 0 $?
+legacy_include_status=0
+"$ROOT/dsec" init legacy-include "$TMP/legacy-include.dsec" >/dev/null 2>&1 || legacy_include_status=$?
+assert_status 'legacy include directive is rejected' 1 "$legacy_include_status"
+
+cat > "$TMP/duplicate-source.dsec" <<'EOF'
+# @schema: dsec/v1
+source | project/base | opt | First source
+source | project/order | req | Duplicate source
+EOF
+duplicate_source_status=0
+"$ROOT/dsec" init duplicate-source "$TMP/duplicate-source.dsec" >/dev/null 2>&1 || duplicate_source_status=$?
+assert_status 'duplicate source directives are rejected' 1 "$duplicate_source_status"
+[[ ! -e "$DSEC_HOME/profiles/duplicate-source.dsec" ]]
+assert_status 'duplicate source init has no profile side effect' 0 $?
+
+set_scope_status=0
+"$ROOT/dsec" set main PORT 6002 --scope extra/deny >/dev/null 2>&1 || set_scope_status=$?
+assert_status 'set rejects removed --scope option' 1 "$set_scope_status"
+set_secret_status=0
+"$ROOT/dsec" set main DB_PASSWORD synthetic --secret alias >/dev/null 2>&1 || set_secret_status=$?
+assert_status 'set rejects removed --secret option' 1 "$set_secret_status"
+undeclared_set_status=0
+"$ROOT/dsec" set main ADDED_SETTING synthetic-value >/dev/null 2>&1 || undeclared_set_status=$?
+assert_status 'set rejects undeclared variables' 2 "$undeclared_set_status"
+grep -q '^var | ADDED_SETTING |' "$DSEC_HOME/profiles/main.dsec"
+assert_status 'set does not append undeclared declarations' 1 $?
 
 cat > "$TMP/invalid-type.dsec" <<'EOF'
 # @schema: dsec/v1

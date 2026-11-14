@@ -12,7 +12,7 @@ interactive developer workstations, not production secret management.
 ## Requirements
 
 - macOS with Zsh and the standard command-line tools used by the script.
-- `envc` for declared non-secret variables and included scopes.
+- `envc` for declared non-secret variables and `source` scopes.
 - `kch` for secret reads and writes.
 
 No third-party parser or language runtime is required.
@@ -39,6 +39,14 @@ Remove those files and the source line to uninstall. Existing profiles are
 stored separately under `${DSEC_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/dsec}`
 and are not removed automatically.
 
+Check the installed CLI version with:
+
+```zsh
+dsec --version
+```
+
+Current release: `dsec 0.1.1`.
+
 ## Manifest
 
 Every manifest begins with `# @schema: dsec/v1`. Records are pipe-delimited;
@@ -47,12 +55,10 @@ the complete portable format is documented in [`spec/SPEC.md`](spec/SPEC.md).
 ```text
 # @schema: dsec/v1
 note | Local development settings.
-wildcard | deny | Require explicit declarations.
-include | acme/base | opt | Shared non-secret defaults
+source | acme/base | opt | Shared non-secret defaults
 var | API_URL | str | acme/service | http://localhost:8080 | Service endpoint
 secret | API_TOKEN | str | api-token | API credential
 const | API_VERSION | v1 | API version
-mutate | API_ROOT | {{API_URL}}/{{API_VERSION}} | API root
 ```
 
 `var` and `secret` declarations carry type constraints; types include
@@ -121,24 +127,22 @@ unintentionally sharing or changing scopes and aliases.
 
 ```text
 dsec init <profile> [source|-] [--env ENV] [--var KEY=VALUE ...] [--force]
-dsec inspect <profile...> [--check] [--reveal]
-dsec set <profile> <ENV_VAR> [value] [--scope SCOPE | --secret [ALIAS]]
-dsec run <profile...> [-o KEY=VALUE ...] -- <command> [args...]
-dsec export <profile...>
+dsec inspect <profile> [--check] [--reveal]
+dsec set <profile> <ENV_VAR> [value]
+dsec run <profile> -- <command> [args...]
+dsec export <profile>
 dsec export-template <profile>
 dsec docs <profile>
 dsec completions
 ```
 
-- `inspect` reports resolved values and source information. Secret-derived
-  values are masked unless `--reveal` is explicitly supplied; `--check`
+- `inspect` reports resolved values and source information. Secret values are
+  masked unless `--reveal` is explicitly supplied; `--check`
   validates required values.
-- `set` routes declared values to their configured backend. For undeclared
-  names, the manifest's `wildcard` policy controls whether the operation is
-  denied or requires an explicit `--scope`/`--secret` route.
+- `set` routes declared values to their configured backend. Undeclared names
+  are rejected; add a `var` or `secret` declaration to the manifest first.
 - `run` injects resolved values into the child process only and propagates
-  the child's exit status. Profiles resolve left-to-right; later profiles and
-  `-o` overrides take precedence.
+  the child's exit status.
 - `export` prints shell-quoted assignments. This output contains plaintext
   values and should be handled accordingly.
 - `export-template` emits the value-free source template using stored token
@@ -154,7 +158,7 @@ dsec completions
   Do not use it with untrusted profile input.
 
 `dsec help` prints the current built-in usage. Exit codes are `0` for success,
-`1` for argument/source/syntax failures, `2` for value or wildcard validation
+`1` for argument/source/syntax failures, `2` for value validation
 failures, and `3` for backend/driver failures.
 
 ## Storage and security
@@ -165,7 +169,7 @@ permissions and atomic replacement. The `envc` adapter rewrites only
 supported static assignments and rejects dynamic shell code rather than
 silently changing its behavior.
 
-`envc` profiles are trusted Zsh code. Secrets and secret-derived mutations
+`envc` profiles are trusted Zsh code. Secrets
 may be exposed to authorized local processes, child processes, the current
 shell when explicitly loaded, or anyone who receives plaintext export output.
 See [`SECURITY.md`](SECURITY.md) for the threat model and limitations.

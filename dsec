@@ -4,24 +4,23 @@ emulate -L zsh
 setopt extendedglob pipefail
 unsetopt err_exit
 
-readonly DSEC_VERSION=0.1.0
+readonly DSEC_VERSION=0.1.1
 readonly DSEC_SCHEMA=dsec/v1
 readonly DSEC_US=$'\x1f'
 
 typeset -g DSEC_HOME_ROOT DSEC_PROFILES_DIR DSEC_TEMPLATES_DIR
 typeset -ga REC_KIND REC_F1 REC_F2 REC_F3 REC_F4 REC_F5 REC_F6 REC_LINE
-typeset -ga NOTE_TEXT INCLUDE_SCOPES MUT_NAME MUT_EXPR MUT_DESC MUT_PROFILE
+typeset -ga NOTE_TEXT
 typeset -ga DRIVER_KEYS
 typeset -ga DSEC_TEMP_FILES
 typeset -gA META TEMPLATE_VARS DRIVER_VALUES VAL_MAP SRC_MAP SHADOW_MAP
 typeset -gA SECRET_FLAG TYPE_MAP DECL_KIND DECL_SCOPE DECL_ALIAS DECL_TYPE DECL_DESC
 typeset -gA FILE_DECL_KIND FILE_DECL_SCOPE FILE_DECL_ALIAS FILE_DECL_TYPE FILE_DECL_DESC
-typeset -gA PARSED_VARS OVERRIDDEN_NAMES
+typeset -gA PARSED_VARS
 typeset -gA EXPLICIT_VARS USED_NAMES ORIGINAL_SOURCE
-typeset -g WILDCARD_POLICY=deny CURRENT_PROFILE=''
 typeset -g STRICT_REQUIRED=0 REPLY_NAME=''
 typeset -gA DSEC_PARENT_VALUES DSEC_LOADED_VALUES
-typeset -ga DSEC_LOADED_NAMES DSEC_ACTIVE_PROFILES
+typeset -ga DSEC_LOADED_NAMES
 
 DSEC_HOME_ROOT=${DSEC_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/dsec}
 [[ $DSEC_HOME_ROOT == /* ]] || DSEC_HOME_ROOT="$PWD/$DSEC_HOME_ROOT"
@@ -46,12 +45,12 @@ Usage: dsec [--version|-V] <command> [arguments]
 
 Commands:
   init <profile> [source|-] [--env ENV] [--var KEY=VALUE ...] [--force]
-  inspect <profile...> [--check] [--reveal]
-  set <profile> <ENV_VAR> [value] [--scope SCOPE | --secret [ALIAS]]
-  run <profile...> [-o KEY=VALUE ...] [--require-sha SHA] -- <command> [args...]
-  load <profile...>                 Use the sourced wrapper or eval dsec export
+  inspect <profile> [--check] [--reveal]
+  set <profile> <ENV_VAR> [value]
+  run <profile> -- <command> [args...]
+  load <profile>                    Use the sourced wrapper or eval dsec export
   unload | clear                    Unset values tracked by the wrapper
-  export <profile...>               Print shell-quoted export statements
+  export <profile>                  Print shell-quoted export statements
   export-template <profile>         Print a value-free shareable template
   docs | render <profile>           Generate a Markdown documentation block
   completions                       Print Zsh completion code
@@ -143,15 +142,14 @@ typeset -ga FIELDS
 
 reset_manifest() {
   REC_KIND=() REC_F1=() REC_F2=() REC_F3=() REC_F4=() REC_F5=() REC_F6=() REC_LINE=()
-  NOTE_TEXT=() INCLUDE_SCOPES=()
+  NOTE_TEXT=()
   META=()
   FILE_DECL_KIND=() FILE_DECL_SCOPE=() FILE_DECL_ALIAS=() FILE_DECL_TYPE=() FILE_DECL_DESC=()
   PARSED_VARS=()
-  WILDCARD_POLICY=deny
 }
 
 parse_manifest() {
-  local file_path=$1 line line_no=0 key value kind field_count i name seen_wildcard=0
+  local file_path=$1 line line_no=0 key value kind field_count i seen_source=0
   reset_manifest
   while IFS= read -r line || [[ -n $line ]]; do
     (( line_no++ ))
@@ -180,21 +178,13 @@ parse_manifest() {
         REC_KIND+=(note); REC_F1+=("$FIELDS[2]"); REC_F2+=(''); REC_F3+=(''); REC_F4+=(''); REC_F5+=(''); REC_F6+=(''); REC_LINE+=("$line_no")
         NOTE_TEXT+=("$FIELDS[2]")
         ;;
-      wildcard)
-        (( field_count == 3 )) || fail 1 "$file_path:$line_no: wildcard requires exactly 3 columns"
-        (( ! seen_wildcard )) || fail 1 "$file_path:$line_no: duplicate wildcard directive"
-        seen_wildcard=1
-        [[ $FIELDS[2] == allow || $FIELDS[2] == warn || $FIELDS[2] == deny ]] ||
-          fail 1 "$file_path:$line_no: wildcard policy must be allow, warn, or deny"
-        WILDCARD_POLICY=$FIELDS[2]
-        REC_KIND+=(wildcard); REC_F1+=("$FIELDS[2]"); REC_F2+=("$FIELDS[3]"); REC_F3+=(''); REC_F4+=(''); REC_F5+=(''); REC_F6+=(''); REC_LINE+=("$line_no")
-        ;;
-      include)
-        (( field_count == 4 )) || fail 1 "$file_path:$line_no: include requires exactly 4 columns"
+      source)
+        (( field_count == 4 )) || fail 1 "$file_path:$line_no: source requires exactly 4 columns"
+        (( ! seen_source )) || fail 1 "$file_path:$line_no: duplicate source directive"
+        seen_source=1
         valid_scope "$FIELDS[2]" || fail 1 "$file_path:$line_no: invalid scope ID '$FIELDS[2]'"
-        [[ $FIELDS[3] == req || $FIELDS[3] == opt ]] || fail 1 "$file_path:$line_no: include mode must be req or opt"
-        REC_KIND+=(include); REC_F1+=("$FIELDS[2]"); REC_F2+=("$FIELDS[3]"); REC_F3+=("$FIELDS[4]"); REC_F4+=(''); REC_F5+=(''); REC_F6+=(''); REC_LINE+=("$line_no")
-        INCLUDE_SCOPES+=("$FIELDS[2]")
+        [[ $FIELDS[3] == req || $FIELDS[3] == opt ]] || fail 1 "$file_path:$line_no: source mode must be req or opt"
+        REC_KIND+=(source); REC_F1+=("$FIELDS[2]"); REC_F2+=("$FIELDS[3]"); REC_F3+=("$FIELDS[4]"); REC_F4+=(''); REC_F5+=(''); REC_F6+=(''); REC_LINE+=("$line_no")
         ;;
       var)
         (( field_count == 6 )) || fail 1 "$file_path:$line_no: var requires exactly 6 columns"
@@ -225,14 +215,6 @@ parse_manifest() {
         REC_KIND+=(const); REC_F1+=("$FIELDS[2]"); REC_F2+=("$FIELDS[3]"); REC_F3+=("$FIELDS[4]"); REC_F4+=(''); REC_F5+=(''); REC_F6+=(''); REC_LINE+=("$line_no")
         FILE_DECL_KIND[$FIELDS[2]]=const FILE_DECL_DESC[$FIELDS[2]]=$FIELDS[4]
         ;;
-      mutate)
-        (( field_count == 4 )) || fail 1 "$file_path:$line_no: mutate requires exactly 4 columns"
-        valid_env "$FIELDS[2]" || fail 1 "$file_path:$line_no: invalid environment variable '$FIELDS[2]'"
-        [[ ! ${+FILE_DECL_KIND[$FIELDS[2]]} -eq 1 ]] || fail 1 "$file_path:$line_no: duplicate declaration '$FIELDS[2]'"
-        valid_mutation_expr "$FIELDS[3]" || fail 1 "$file_path:$line_no: invalid interpolation in mutation '$FIELDS[2]'"
-        REC_KIND+=(mutate); REC_F1+=("$FIELDS[2]"); REC_F2+=("$FIELDS[3]"); REC_F3+=("$FIELDS[4]"); REC_F4+=(''); REC_F5+=(''); REC_F6+=(''); REC_LINE+=("$line_no")
-        FILE_DECL_KIND[$FIELDS[2]]=mutate FILE_DECL_DESC[$FIELDS[2]]=$FIELDS[4]
-        ;;
       *)
         fail 1 "$file_path:$line_no: unknown directive '$FIELDS[1]'"
         ;;
@@ -258,15 +240,6 @@ valid_scope() {
   local scope=$1
   [[ $scope =~ '^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)?$' ]] &&
     [[ ${scope%%/*} != . && ${scope%%/*} != .. && ${scope##*/} != . && ${scope##*/} != .. ]]
-}
-
-valid_mutation_expr() {
-  local remaining=$1
-  while [[ $remaining == *'{{'* ]]; do
-    [[ $remaining =~ '^([^{}]*)\{\{([A-Za-z_][A-Za-z0-9_]*)(:(upper|lower))?\}\}(.*)$' ]] || return 1
-    remaining=${match[5]}
-  done
-  [[ $remaining != *'}}'* && $remaining != *'{'* && $remaining != *'}'* ]]
 }
 
 parse_vars_metadata() {
@@ -666,25 +639,23 @@ unset_value() {
 }
 
 resolve_one_profile() {
-  local profile=$1 file_path=$2 i phase kind name scope alias value type default mode source
-  CURRENT_PROFILE=$profile
+  local profile=$1 file_path=$2 i phase kind name scope alias value type mode
   parse_manifest "$file_path"
-  DSEC_ACTIVE_PROFILES+=("$profile")
-  for (( phase = 1; phase <= 4; phase++ )); do
+  for (( phase = 1; phase <= 3; phase++ )); do
     for (( i = 1; i <= ${#REC_KIND}; i++ )); do
       kind=${REC_KIND[i]}
       case "$phase:$kind" in
-        1:include)
+        1:source)
           scope=${REC_F1[i]} mode=${REC_F2[i]}
           if driver_scope_exists "$scope"; then
             driver_scope_load "$scope"
             for name in "${DRIVER_KEYS[@]}"; do
-              valid_env "$name" || fail 2 "included scope '$scope' has invalid variable name '$name'"
+              valid_env "$name" || fail 2 "source scope '$scope' has invalid variable name '$name'"
               (( ${+DRIVER_VALUES[$name]} )) || continue
-              set_value "$name" "${DRIVER_VALUES[$name]}" "$profile/include:$scope" 0 ''
+              set_value "$name" "${DRIVER_VALUES[$name]}" "$profile/source:$scope" 0 ''
             done
           elif [[ $mode == req ]]; then
-            fail 2 "required include scope '$scope' is missing"
+            fail 2 "required source scope '$scope' is missing"
           fi
           ;;
         2:var)
@@ -726,105 +697,20 @@ resolve_one_profile() {
           set_value "${REC_F1[i]}" "${REC_F2[i]}" "$profile/const" 0 ''
           DECL_KIND[${REC_F1[i]}]=const DECL_DESC[${REC_F1[i]}]=${REC_F3[i]}
           ;;
-        4:mutate)
-          MUT_NAME+=("${REC_F1[i]}"); MUT_EXPR+=("${REC_F2[i]}"); MUT_DESC+=("${REC_F3[i]}"); MUT_PROFILE+=("$profile")
-          DECL_KIND[${REC_F1[i]}]=mutate DECL_DESC[${REC_F1[i]}]=${REC_F3[i]}
-          ;;
       esac
     done
   done
-}
-
-apply_mutations() {
-  local unresolved=1 pass=1 i expr name token key modifier value derived changed
-  local -a unresolved_indices
-  local -A mutation_seen last_mutation
-  unresolved_indices=()
-  for (( i = 1; i <= ${#MUT_NAME}; i++ )); do last_mutation[${MUT_NAME[i]}]=$i; done
-  for (( i = 1; i <= ${#MUT_NAME}; i++ )); do
-    [[ ${last_mutation[${MUT_NAME[i]}]} == $i ]] || continue
-    (( ${+OVERRIDDEN_NAMES[${MUT_NAME[i]}]} )) && continue
-    unresolved_indices+=("$i")
-  done
-  while (( ${#unresolved_indices} > 0 && pass <= ${#MUT_NAME} )); do
-    local -a next
-    next=()
-    changed=0
-    for i in "${unresolved_indices[@]}"; do
-      name=${MUT_NAME[i]} expr=${MUT_EXPR[i]} derived=0
-      local remaining=$expr result=''
-      while [[ $remaining =~ '^([^{}]*)\{\{([A-Za-z_][A-Za-z0-9_]*)(:(upper|lower))?\}\}(.*)$' ]]; do
-        result+="${match[1]}"
-        key=${match[2]} modifier=${match[4]-}
-        if (( ! ${+VAL_MAP[$key]} )); then
-          if (( ${+DECL_KIND[$key]} )) && [[ ${DECL_KIND[$key]} == mutate ]]; then
-            break
-          fi
-          fail 2 "mutation '$name' references missing variable '$key'"
-        fi
-        value=${VAL_MAP[$key]}
-        [[ $modifier == upper ]] && value=${(U)value}
-        [[ $modifier == lower ]] && value=${(L)value}
-        result+=$value
-        (( ${SECRET_FLAG[$key]:-0} )) && derived=1
-        remaining=${match[5]}
-      done
-      if [[ $remaining == $expr && $expr == *'{{'* ]]; then
-        next+=("$i")
-        continue
-      fi
-      result+=$remaining
-      [[ $result != *'{{'* ]] || { next+=("$i"); continue; }
-      set_value "$name" "$result" "${MUT_PROFILE[i]}/mutate" "$derived" ''
-      mutation_seen[$name]=1
-      changed=1
-    done
-    unresolved_indices=("${next[@]}")
-    (( changed )) || break
-    (( pass++ ))
-  done
-  (( ${#unresolved_indices} == 0 )) || fail 2 "mutation dependency cycle detected"
 }
 
 parse_profiles_and_resolve() {
-  local -a profiles
-  profiles=("$@")
-  (( ${#profiles} > 0 )) || fail 1 "at least one profile is required"
+  (( $# == 1 )) || fail 1 "exactly one profile is required"
+  local profile=$1 file_path
   VAL_MAP=() SRC_MAP=() SHADOW_MAP=() SECRET_FLAG=() TYPE_MAP=() USED_NAMES=()
-  MUT_NAME=() MUT_EXPR=() MUT_DESC=() MUT_PROFILE=() DSEC_ACTIVE_PROFILES=()
-  OVERRIDDEN_NAMES=()
   DECL_KIND=() DECL_SCOPE=() DECL_ALIAS=() DECL_TYPE=() DECL_DESC=()
-  local profile file_path
-  for profile in "${profiles[@]}"; do
-    profile_path "$profile"; file_path=$REPLY
-    validate_regular_file "$file_path" "profile '$profile'"
-    resolve_one_profile "$profile" "$file_path"
-  done
-  apply_overrides
-  apply_mutations
+  profile_path "$profile"; file_path=$REPLY
+  validate_regular_file "$file_path" "profile '$profile'"
+  resolve_one_profile "$profile" "$file_path"
 }
-
-apply_overrides() {
-  local item key value secret_override
-  for item in "${CLI_OVERRIDES[@]}"; do
-    key=${item%%=*}; value=${item#*=}
-    valid_env "$key" || fail 1 "invalid override variable '$key'"
-    if (( ! ${+DECL_KIND[$key]} )); then
-      case $WILDCARD_POLICY in
-        deny) fail 2 "undeclared override '$key' denied by wildcard policy" ;;
-        warn) print -u2 -r -- "dsec: warning: allowing undeclared override '$key'";;
-      esac
-    elif [[ ${+DECL_TYPE[$key]} == 1 ]] && ! validate_value "${DECL_TYPE[$key]}" "$value"; then
-      fail 2 "override for '$key' does not satisfy type '${DECL_TYPE[$key]}'"
-    fi
-    secret_override=${SECRET_FLAG[$key]:-0}
-    [[ ${DECL_KIND[$key]-} == secret ]] && secret_override=1
-    set_value "$key" "$value" 'cli:-o' "$secret_override" "${DECL_TYPE[$key]-}"
-    OVERRIDDEN_NAMES[$key]=1
-  done
-}
-
-typeset -ga CLI_OVERRIDES
 
 profile_notes() {
   local profile=$1 file_path=$2
@@ -858,49 +744,32 @@ print_shell_exports() {
 }
 
 cmd_export() {
-  local -a profiles
-  profiles=()
-  while (( $# )) && [[ $1 != -o ]]; do profiles+=("$1"); shift; done
-  CLI_OVERRIDES=()
-  while (( $# )); do
-    [[ $1 == -o && $# -ge 2 && $2 == *=* ]] || fail 1 "export accepts only -o KEY=VALUE after profiles"
-    CLI_OVERRIDES+=("$2"); shift 2
+  local arg
+  (( $# >= 1 )) || fail 1 "export requires exactly one profile"
+  for arg in "$@"; do
+    [[ $arg == -* ]] && fail 1 "unknown export option '$arg'"
   done
-  parse_profiles_and_resolve "${profiles[@]}"
+  (( $# == 1 )) || fail 1 "export accepts exactly one profile"
+  parse_profiles_and_resolve "$1"
   check_resolved
   print_shell_exports
 }
 
 cmd_run() {
   local -a profiles command_args
-  local require_sha=''
-  profiles=() CLI_OVERRIDES=()
+  profiles=()
   while (( $# )) && [[ $1 != -- ]]; do
     case $1 in
-      -o)
-        (( $# >= 2 )) || fail 1 "-o requires KEY=VALUE"
-        [[ $2 == *=* ]] || fail 1 "-o requires KEY=VALUE"
-        CLI_OVERRIDES+=("$2"); shift 2
-        ;;
-      --require-sha)
-        (( $# >= 2 )) || fail 1 "--require-sha requires a SHA-256 value"
-        require_sha=$2; shift 2
-        ;;
       -*) fail 1 "unknown run option '$1'" ;;
       *) profiles+=("$1"); shift ;;
     esac
   done
+  (( ${#profiles} == 1 )) || fail 1 "run accepts exactly one profile"
   (( $# > 0 )) || fail 1 "run requires '--' before the command"
   shift
   (( $# > 0 )) || fail 1 "run requires a command after '--'"
   command_args=("$@")
-  if [[ -n $require_sha ]]; then
-    profile_path "$profiles[1]"
-    local computed
-    computed=$(compute_sha "$REPLY")
-    [[ $computed == $require_sha ]] || fail 2 "primary profile SHA-256 does not match --require-sha"
-  fi
-  parse_profiles_and_resolve "${profiles[@]}"
+  parse_profiles_and_resolve "$profiles[1]"
   check_resolved
   local -a env_args
   env_args=()
@@ -914,6 +783,7 @@ cmd_run() {
 cmd_inspect() {
   local reveal=0 check=0
   local -a profiles
+  local profile file_path key shown type source shadow item_status
   profiles=()
   while (( $# )); do
     case $1 in
@@ -924,17 +794,16 @@ cmd_inspect() {
     esac
     shift
   done
+  (( ${#profiles} == 1 )) || fail 1 "inspect accepts exactly one profile"
+  profile=${profiles[1]}
   STRICT_REQUIRED=$check
-  parse_profiles_and_resolve "${profiles[@]}"
+  parse_profiles_and_resolve "$profile"
   if (( check )); then check_resolved; fi
-  local profile file_path note key shown type source shadow item_status desc
-  print -r -- "Profiles: ${(j:, :)profiles}"
-  for profile in "${profiles[@]}"; do
-    profile_path "$profile"; file_path=$REPLY
-    profile_notes "$profile" "$file_path"
-  done
+  print -r -- "Profile: $profile"
+  profile_path "$profile"; file_path=$REPLY
+  profile_notes "$profile" "$file_path"
   print -r -- ''
-  printf '%-28s %-22s %-24s %-38s %s\n' 'EXPORTED VARIABLE' 'TYPE' 'EFFECTIVE VALUE' 'SOURCE / OVERRIDES' 'STATUS'
+  printf '%-28s %-22s %-24s %-38s %s\n' 'EXPORTED VARIABLE' 'TYPE' 'EFFECTIVE VALUE' 'SOURCE / SHADOWS' 'STATUS'
   for key in ${(ok)USED_NAMES}; do
     type=${TYPE_MAP[$key]-}
     source=${SRC_MAP[$key]-}
@@ -956,11 +825,6 @@ cmd_set() {
   local value='' routing='' alias='' scope='' secret_flag=0
   while (( $# )); do
     case $1 in
-      --scope) (( $# >= 2 )) || fail 1 "--scope requires a scope ID"; scope=$2; shift 2 ;;
-      --secret)
-        secret_flag=1; shift
-        if (( $# )) && [[ $1 != -* ]]; then alias=$1; shift; fi
-        ;;
       -*) fail 1 "unknown set option '$1'" ;;
       *)
         [[ -z $value ]] || fail 1 "set accepts at most one value"
@@ -973,27 +837,12 @@ cmd_set() {
   validate_regular_file "$file_path" "profile '$profile'"
   parse_manifest "$file_path"
   local kind=${FILE_DECL_KIND[$key]-} type=${FILE_DECL_TYPE[$key]-}
-  if [[ -z $kind ]]; then
-    case $WILDCARD_POLICY in
-      deny) fail 2 "undeclared variable '$key' denied by wildcard policy" ;;
-      warn) print -u2 -r -- "dsec: warning: adding undeclared variable '$key'" ;;
-    esac
-    if (( secret_flag )); then kind=secret; type=str; alias=${alias:-$key}
-      [[ -z $scope ]] || fail 1 "undeclared '$key' requires exactly one of --scope SCOPE or --secret [ALIAS]"
-    else
-      [[ -n $scope ]] || fail 1 "undeclared '$key' requires exactly one of --scope SCOPE or --secret [ALIAS]"
-      kind=var; type=str
-      valid_scope "$scope" || fail 1 "invalid scope ID '$scope'"
-    fi
-  else
-    (( secret_flag == 0 && ${#scope} == 0 )) ||
-      fail 1 "routing flags cannot override declared '$kind' storage"
-    case $kind in
-      var) scope=${FILE_DECL_SCOPE[$key]} ;;
-      secret) alias=${FILE_DECL_ALIAS[$key]} secret_flag=1 ;;
-      *) fail 1 "'$key' is not stored; only var and secret values can be set" ;;
-    esac
-  fi
+  [[ -n $kind ]] || fail 2 "undeclared variable '$key'; add a var or secret declaration first"
+  case $kind in
+    var) scope=${FILE_DECL_SCOPE[$key]} ;;
+    secret) alias=${FILE_DECL_ALIAS[$key]} secret_flag=1 ;;
+    *) fail 1 "'$key' is not stored; only var and secret values can be set" ;;
+  esac
   if [[ $kind == secret ]]; then
     alias=${alias:-$key}
     [[ $alias != *$'\n'* && $alias != *$'\r'* && $alias != *'|'* ]] ||
@@ -1007,39 +856,7 @@ cmd_set() {
   if [[ $kind == secret ]]; then driver_secret_set "$alias" "$value"
   else driver_var_set "$scope" "$key" "$value"
   fi
-  if [[ -z ${FILE_DECL_KIND[$key]-} ]]; then
-    local newline
-    if [[ $kind == secret ]]; then
-      newline="secret | $key | str | ${alias} | Added via dsec set"
-    else
-      newline="var | $key | str | $scope | | Added via dsec set"
-    fi
-    append_profile_line "$file_path" "$newline"
-  fi
   print -r -- "Set $key"
-}
-
-append_profile_line() {
-  local file_path=$1 line=$2 tmp output parent=${1:h} mode sha source_line
-  [[ ! -L $file_path && -f $file_path ]] || fail 1 "refusing unsafe profile file"
-  mode=$(/usr/bin/stat -f '%Lp' "$file_path") || fail 3 "could not inspect profile permissions"
-  tmp=$(/usr/bin/mktemp "$parent/.dsec-profile.XXXXXX") || fail 3 "could not create temporary profile"
-  /bin/cat "$file_path" > "$tmp" || { /bin/rm -f "$tmp"; fail 3 "could not copy profile"; }
-  encode_b64 "$line"
-  print -r -- "# @source64: $REPLY" >> "$tmp"
-  print -r -- "$line" >> "$tmp"
-  sha=$(compute_sha "$tmp") || { /bin/rm -f "$tmp"; fail 3 "could not update profile hash"; }
-  output=$(/usr/bin/mktemp "$parent/.dsec-profile.XXXXXX") || { /bin/rm -f "$tmp"; fail 3 "could not create temporary profile"; }
-  while IFS= read -r source_line || [[ -n $source_line ]]; do
-    if [[ $source_line == '# @template_sha:'* ]]; then
-      print -r -- "# @template_sha: $sha"
-    else
-      print -r -- "$source_line"
-    fi
-  done < "$tmp" > "$output"
-  /bin/rm -f "$tmp"
-  /bin/chmod "$mode" "$output" && /bin/mv -f "$output" "$file_path" ||
-    { /bin/rm -f "$output"; fail 3 "could not update profile"; }
 }
 
 compute_sha() {
@@ -1052,10 +869,9 @@ compute_sha() {
     kind=${(L)FIELDS[1]}
     [[ $kind == note ]] && continue
     case $kind in
-      var|include) structural+=("${(j:|:)FIELDS[1,4]}") ;;
+      var|source) structural+=("${(j:|:)FIELDS[1,4]}") ;;
       secret) structural+=("${(j:|:)FIELDS[1,4]}") ;;
-      const|mutate) structural+=("${(j:|:)FIELDS[1,3]}") ;;
-      wildcard) structural+=("${(j:|:)FIELDS[1,2]}") ;;
+      const) structural+=("${(j:|:)FIELDS[1,3]}") ;;
     esac
   done < "$file_path"
   printf '%s\n' "${structural[@]}" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'
@@ -1091,17 +907,14 @@ escape_manifest_value() {
 }
 
 init_substitute_line() {
-  local line=$1 preserve_runtime=$2 result='' remainder=$1 token key prefix suffix modifier
+  local line=$1 result='' remainder=$1 key prefix suffix
   REPLY=''
   while [[ $remainder =~ '^([^{}]*)\{\{([A-Za-z_][A-Za-z0-9_]*)(:[a-z]+)?\}\}(.*)$' ]]; do
-    prefix=${match[1]} key=${match[2]} modifier=${match[3]-} suffix=${match[4]}
+    prefix=${match[1]} key=${match[2]} suffix=${match[4]}
     result+=$prefix
-    token="{{${key}${modifier}}}"
     if (( ${+TEMPLATE_VARS[$key]} )); then
       escape_manifest_value "${TEMPLATE_VARS[$key]}"
       result+=$REPLY
-    elif (( preserve_runtime )); then
-      result+=$token
     else
       prompt_value "$key" str '' 0
       TEMPLATE_VARS[$key]=$REPLY
@@ -1128,10 +941,10 @@ preflight_init_backends() {
   for (( i = 1; i <= ${#REC_KIND}; i++ )); do
     kind=${REC_KIND[i]}
     case $kind in
-      include)
+      source)
         scope=${REC_F1[i]}
         if [[ ${REC_F2[i]} == req ]] && ! driver_scope_exists "$scope"; then
-          fail 2 "required include scope '$scope' is missing"
+          fail 2 "required source scope '$scope' is missing"
         fi
         ;;
       var)
@@ -1250,21 +1063,14 @@ cmd_init() {
     if [[ $source_line =~ '^[[:space:]]*#' || -z ${source_line//[ $'\t']/} ]]; then
       transformed=$source_line
     else
-      if [[ $source_line =~ '^[[:space:]]*#' ]]; then transformed=$source_line
-      else
-        if [[ $source_line =~ '^[[:space:]]*mutate[[:space:]]*\|' ]]; then
-          init_substitute_line "$source_line" 1
-        else
-          init_substitute_line "$source_line" 0
-        fi
-        transformed=$REPLY
-      fi
+      init_substitute_line "$source_line"
+      transformed=$REPLY
     fi
     print -r -- "$transformed" >> "$src_tmp"
   done <<< "$source_text"
   [[ -n $template_id ]] || template_id=$profile
   if [[ $template_id == *'{{'* ]]; then
-    init_substitute_line "$template_id" 0
+    init_substitute_line "$template_id"
     template_id=$REPLY
   fi
   valid_id "$template_id" || fail 1 "invalid template ID '$template_id'"
@@ -1386,7 +1192,7 @@ cmd_docs() {
         def='—'; [[ $kind == var && -n ${REC_F4[i]} ]] && def=${REC_F4[i]}
         print -r -- "| \`${REC_F1[i]}\` | $kind | \`$type\` | $required | $def | ${REC_F5[i]:-${REC_F4[i]}} |"
         ;;
-      const|mutate)
+      const)
         print -r -- "| \`${REC_F1[i]}\` | $kind | — | no | — | ${REC_F3[i]} |"
         ;;
     esac
@@ -1428,8 +1234,6 @@ _dsec() {
       elif (( CURRENT == 4 )); then
         names=(${(f)"$(command dsec __complete_variables ${words[3]} 2>/dev/null)"})
         compadd -- $names
-      else
-        compadd -- --scope --secret
       fi
       ;;
     run)
@@ -1440,16 +1244,10 @@ _dsec() {
         _normal
         return
       fi
-      if [[ ${words[CURRENT-1]} == -o ]]; then
-        names=(${(f)"$(command dsec __complete_variables ${words[3]} 2>/dev/null)"})
-        compadd -S '=' -- $names
-      else
-        compadd -- $profiles -o --require-sha
-      fi
+      compadd -- $profiles
       ;;
     load|export)
       compadd -- $profiles
-      [[ ${words[2]} == export ]] && compadd -- -o
       ;;
     export-template|docs|render)
       compadd -- $profiles

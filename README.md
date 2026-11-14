@@ -73,6 +73,50 @@ required values are prompted for in an interactive terminal and stored using
 their declared backend. A manifest can also be supplied on stdin with `-`.
 Templates are re-initialized by naming the stored profile or template.
 
+### Example: separate MYAPP environments
+
+The value-free [`examples/myapp.dsec`](examples/myapp.dsec) template uses
+`{{ENV}}` to give each environment its own `envc` scope and Keychain aliases.
+It also declares a `MYAPP_ENV` constant set to that environment name when
+the profile is initialized; constants need no backend or prompt.
+From the project directory, create profiles interactively:
+
+```zsh
+dsec init myapp-dev ./examples/myapp.dsec --env dev
+dsec init myapp-test ./examples/myapp.dsec --env test
+```
+
+Provide the values at the prompts; secret prompts do not echo input. The
+client secret, signing key, and allowed email list go into Keychain; the base
+URL, client ID, and FastMCP home go into `envc`. The home is a `str`, so it
+may name a directory that does not exist yet. Existing valid backend values
+are reused without prompting.
+
+```zsh
+# Inspect and check required values; non-secret values are shown.
+dsec inspect myapp-dev --check
+
+# Launch an application with one environment without changing this shell.
+dsec run myapp-dev -- <your-application> [arguments...]
+dsec run myapp-test -- <your-application> [arguments...]
+
+# Update a value interactively, without putting it in shell history.
+dsec set myapp-dev MYAPP_GOOGLE_CLIENT_SECRET
+dsec set myapp-test MYAPP_MCP_BASE_URL
+
+# With dsec.plugin.zsh sourced, load into this shell and later restore it.
+dsec load myapp-dev
+dsec unload
+```
+
+Use the email format expected by your application. Although the email list is
+stored as a secret for privacy, `run`, `load`, `export`, and `inspect --reveal`
+can expose it to processes or output. The other three values are not masked by
+`inspect` and may reveal local configuration; avoid sharing that output.
+`--env` substitutes the template when initializing a profile; it is not a
+runtime switch. Use the same environment spelling consistently to avoid
+unintentionally sharing or changing scopes and aliases.
+
 ## Commands
 
 ```text

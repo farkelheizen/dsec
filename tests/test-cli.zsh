@@ -220,6 +220,36 @@ assert_status 'reinitialization restores stored placeholder mappings' 0 "$reinit
 reinit_run=$("$ROOT/dsec" run templated -- /usr/bin/env 2>/dev/null)
 assert 'reinitialization applies new explicit values and preserves prior mappings' contains "$reinit_run" 'DYNAMIC_LABEL=left|right/prod-value'
 
+mkdir -p "$ENVC_CONFIG_DIR/myapp"
+for environment in dev test; do
+  cat > "$ENVC_CONFIG_DIR/myapp/$environment.env" <<EOF
+export MYAPP_MCP_BASE_URL='https://$environment.example.test'
+export MYAPP_GOOGLE_CLIENT_ID='$environment-client-id'
+export FASTMCP_HOME='/synthetic/$environment'
+EOF
+  for alias_suffix in google-client-secret mcp-signing-key google-allowed-emails; do
+    print -rn -- "synthetic-$environment-$alias_suffix" > "$KCH_MOCK_STORE/myapp-$environment-$alias_suffix"
+  done
+  myapp_init=$("$ROOT/dsec" init "myapp-$environment" "$ROOT/examples/myapp.dsec" --env "$environment" 2>&1)
+  myapp_init_status=$?
+  (( myapp_init_status == 0 )) || print -u2 -r -- "$myapp_init"
+  assert_status "MYAPP $environment example initializes" 0 "$myapp_init_status"
+  myapp_run=$("$ROOT/dsec" run "myapp-$environment" -- /usr/bin/env 2>&1)
+  assert_status "MYAPP $environment runs successfully" 0 $?
+  assert "MYAPP $environment exports its environment constant" contains "$myapp_run" "MYAPP_ENV=$environment"
+  assert "MYAPP $environment uses its own non-secret scope" contains "$myapp_run" "MYAPP_MCP_BASE_URL=https://$environment.example.test"
+  assert "MYAPP $environment resolves the client ID" contains "$myapp_run" "MYAPP_GOOGLE_CLIENT_ID=$environment-client-id"
+  assert "MYAPP $environment resolves the FastMCP home" contains "$myapp_run" "FASTMCP_HOME=/synthetic/$environment"
+  assert "MYAPP $environment resolves the client secret" contains "$myapp_run" "MYAPP_GOOGLE_CLIENT_SECRET=synthetic-$environment-google-client-secret"
+  assert "MYAPP $environment resolves the signing key" contains "$myapp_run" "MYAPP_MCP_SIGNING_KEY=synthetic-$environment-mcp-signing-key"
+  assert "MYAPP $environment uses its own Keychain aliases" contains "$myapp_run" "MYAPP_GOOGLE_ALLOWED_EMAILS=synthetic-$environment-google-allowed-emails"
+  myapp_inspect=$("$ROOT/dsec" inspect "myapp-$environment" --check 2>&1)
+  assert_status "MYAPP $environment inspection succeeds" 0 $?
+  assert "MYAPP $environment masks the email list" not_contains "$myapp_inspect" "synthetic-$environment-google-allowed-emails"
+  assert "MYAPP $environment masks the client secret" not_contains "$myapp_inspect" "synthetic-$environment-google-client-secret"
+  assert "MYAPP $environment masks the signing key" not_contains "$myapp_inspect" "synthetic-$environment-mcp-signing-key"
+done
+
 template=$("$ROOT/dsec" export-template main 2>&1)
 assert 'template export restores the source manifest' contains "$template" 'mutate | DATABASE_URL | {{SCHEME}}'
 assert 'template export contains no secret value' not_contains "$template" 'synthetic-secret-value'

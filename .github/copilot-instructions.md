@@ -19,13 +19,13 @@
 
 - Treat `.dsec` as a line-oriented, pipe-delimited format. Preserve regex-pipe
   protection, metadata headers, placeholder substitution, type validation,
-  optional values, profile stacking, provenance, and reversible template
-  placeholder behavior described in `spec/SPEC.md` and the local
-  `docs_local/dsec-project-plan.md`.
+  optional values, single-profile command behavior, provenance, and reversible
+  template placeholder behavior described in `spec/SPEC.md` and the local
+  `docs_local/dsec-project-plan-v1.1.md`.
 - Never print secret values in diagnostics, errors, tests, fixtures, logs, or
   generated documentation. `--reveal` must remain an explicit opt-in.
-- Use synthetic values only. Keep `const` and `mutate` exposure risks,
-  environment inheritance, Keychain access, and trusted `envc` profile
+- Use synthetic values only. Keep `const` exposure risks, environment
+  inheritance, Keychain access, and trusted `envc` profile
   execution documented honestly; do not claim guaranteed IDE or LLM
   isolation.
 - Do not position dsec as a server secret manager. It is for interactive

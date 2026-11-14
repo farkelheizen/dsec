@@ -1,0 +1,9 @@
+# @schema: dsec/v1
+note | MYAPP configuration for {{ENV}}.
+const | MYAPP_ENV | {{ENV}} | Environment name
+secret | MYAPP_GOOGLE_CLIENT_SECRET | str | myapp-{{ENV}}-google-client-secret | Google OAuth client secret
+secret | MYAPP_MCP_SIGNING_KEY | str | myapp-{{ENV}}-mcp-signing-key | MCP signing key
+secret | MYAPP_GOOGLE_ALLOWED_EMAILS | str | myapp-{{ENV}}-google-allowed-emails | Allowed Google account emails
+var | MYAPP_MCP_BASE_URL | str | myapp/{{ENV}} | | MCP service base URL
+var | MYAPP_GOOGLE_CLIENT_ID | str | myapp/{{ENV}} | | Google OAuth client ID
+var | FASTMCP_HOME | str | myapp/{{ENV}} | | FastMCP home directory

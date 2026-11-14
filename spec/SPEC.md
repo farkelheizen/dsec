@@ -20,17 +20,15 @@ template identifiers, escaped substitution mappings, and token provenance.
 Unknown metadata is ignored by portable readers unless a future schema says
 otherwise.
 
-The seven directives have exact column counts:
+The five directives have exact column counts:
 
 | Directive | Columns | Meaning |
 |---|---:|---|
 | `note` | 2 | Human-readable note |
-| `wildcard` | 3 | `allow`, `warn`, or `deny`, followed by a description |
-| `include` | 4 | Scope ID, `req` or `opt`, and description |
+| `source` | 4 | Scope ID, `req` or `opt`, and description (at most one per manifest) |
 | `var` | 6 | Name, type, scope ID, default (possibly empty), description |
 | `secret` | 5 | Name, type, storage alias (possibly empty), description |
 | `const` | 4 | Name, literal value, description |
-| `mutate` | 4 | Name, interpolation expression, description |
 
 Names use shell environment-variable syntax. Scope IDs and profile IDs are
 relative identifiers; absolute paths and traversal are invalid. A secret
@@ -51,30 +49,22 @@ exist.
 
 `{{KEY}}` denotes a template placeholder. `init --env VALUE` supplies `ENV`;
 repeated `--var KEY=VALUE` supplies other keys. Unresolved placeholders in
-ordinary directives are prompted for interactively. In `mutate` expressions,
-only explicitly supplied init variables are substituted; remaining
-`{{NAME}}`, `{{NAME:upper}}`, and `{{NAME:lower}}` tokens are runtime
-references.
+directives are prompted for interactively.
 
 ## Resolution
 
-Profiles resolve left-to-right. For each profile:
+For each profile:
 
-1. Load required/optional `include` scopes in manifest order.
+1. Load required/optional `source` scope.
 2. Resolve declared `var` and `secret` values, including defaults.
 3. Apply `const` declarations.
-4. Evaluate mutations after all base values and CLI overrides are known.
 
-Later profiles and command-line overrides shadow earlier values. Included
-scope variables remain permitted even when undeclared. `wildcard` controls
-only undeclared `set` and `run -o` variables: `deny` rejects them, `warn`
-permits with a diagnostic, and `allow` permits silently. Missing mutation
-references and cycles are validation failures.
+`set` rejects undeclared names; values may be written only for manifest
+entries declared as `var` or `secret`.
 
-Secret status propagates through nested mutations. Inspection masks
-secret-derived values unless `--reveal` is explicitly supplied. Optional
-unset values are omitted; required values are validated before child startup
-or export output.
+Inspection masks secret-derived values unless `--reveal` is explicitly
+supplied. Optional unset values are omitted; required values are validated
+before child startup or export output.
 
 ## Storage boundary
 
@@ -99,9 +89,10 @@ mutate its caller's environment.
 |---:|---|
 | 0 | Success |
 | 1 | Argument, source, syntax, or malformed-manifest failure |
-| 2 | Schema/value validation or wildcard-policy failure |
+| 2 | Schema/value validation failure |
 | 3 | Backend or platform-driver failure |
 
-Diagnostics must not include secret values. `run` injects resolved values
-only into its child process and propagates the child's exit status. Shell
-exports and `--reveal` are explicit plaintext exposure surfaces.
+Diagnostics must not include secret values. `run`, `inspect`, and `export`
+accept exactly one profile. `run` injects resolved values only into its
+child process and propagates the child's exit status. Shell exports and
+`--reveal` are explicit plaintext exposure surfaces.

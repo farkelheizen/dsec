@@ -1,0 +1,3 @@
+# @schema: dsec/v1
+source | project/base | opt | First source scope
+source | project/extra | req | Duplicate source scope

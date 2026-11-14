@@ -7,7 +7,7 @@ dsec() {
   (( $# )) && shift
   case $command_name in
     load)
-      (( $# > 0 )) || { print -u2 -r -- 'dsec: load requires at least one profile'; return 1; }
+      (( $# == 1 )) || { print -u2 -r -- 'dsec: load requires exactly one profile'; return 1; }
       local exports status=0 name
       exports=$("$_DSEC_BIN" export "$@") || status=$?
       (( status == 0 )) || return "$status"

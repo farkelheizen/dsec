@@ -1,0 +1,4 @@
+# @schema: dsec/v1
+var | MODE | str | | dev | Inherits the source even when it follows
+source | project/app | opt | Shared scope
+var | EXPLICIT | str? | project/app/_ | | Explicit default slot

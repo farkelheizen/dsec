@@ -30,10 +30,20 @@ The five directives have exact column counts:
 | `secret` | 5 | Name, type, storage alias (possibly empty), description |
 | `const` | 4 | Name, literal value, description |
 
-Names use shell environment-variable syntax. Scope IDs and profile IDs are
-relative identifiers; absolute paths and traversal are invalid. A secret
-alias may be empty, in which case the variable name is used. Secrets must
-never be placed in manifests or fixtures.
+Names use shell environment-variable syntax. A `var` name additionally uses
+1-128 ASCII letters, digits, or underscores, must not start with a digit,
+and must not be a reserved device name. Profile IDs are relative identifiers.
+A secret alias may be empty, in which case the variable name is used. Secrets
+must never be placed in manifests or fixtures.
+
+A scope ID is `<org>/<module>` or `<org>/<module>/<version>`. Organization,
+module, and version segments contain 1-64 ASCII letters, digits, `.`, `_`,
+or `-`, start with a letter or digit, and do not end in `.`. A version may
+alternatively be `_`. Windows device names (CON, PRN, AUX, NUL, COM1-COM9,
+LPT1-LPT9, case-insensitive, including a stem before `.`) are reserved.
+Absolute paths, empty segments, and traversal are invalid. The two-segment
+form selects version `_`. These are dsec's portable scope-ID rules, not a
+requirement to use a particular backend.
 
 Pipes inside `/.../` regex type expressions and escaped `\|` are literal
 field content. Newlines in values are unsupported. Duplicate declarations
@@ -55,8 +65,13 @@ directives are prompted for interactively.
 
 For each profile:
 
-1. Load required/optional `source` scope.
-2. Resolve declared `var` and `secret` values, including defaults.
+1. Check the `source` scope, if present. A `req` scope must exist; an `opt`
+   scope may be absent. Enumerate and validate a present scope without
+   importing its values.
+2. Resolve declared `var` and `secret` values, including defaults. An empty
+   `var` scope inherits the source scope; without a source it is invalid.
+   A nonempty `var` scope overrides the source for that declaration. The
+   source mode does not change whether individual values are required.
 3. Apply `const` declarations.
 
 `set` rejects undeclared names; values may be written only for manifest
@@ -69,14 +84,15 @@ before child startup or export output.
 ## Storage boundary
 
 Portable code depends on six operations: scope existence/load/read/write and
-secret read/write. The macOS reference adapter uses `envc` for non-secret
+secret read/write. The macOS reference adapter uses `evar` for non-secret
 scopes and `kch`/the macOS Keychain for secrets. Other ports may substitute
 backends without changing manifest syntax. Backend errors must not be
 silently treated as missing values.
 
-`envc` profiles are trusted shell code. A safe writer may modify only static
-assignments it can preserve; dynamic or ambiguous profiles must be rejected.
-Profile files are written atomically with restrictive permissions.
+The reference adapter accesses evar only through its CLI. It does not import
+undeclared variables, evaluate storage as shell code, or fall back to envc.
+Non-secret values are single-line UTF-8 without NUL or CR. Profile files are
+written atomically with restrictive permissions.
 
 ## CLI and exit codes
 
@@ -94,5 +110,6 @@ mutate its caller's environment.
 
 Diagnostics must not include secret values. `run`, `inspect`, and `export`
 accept exactly one profile. `run` injects resolved values only into its
-child process and propagates the child's exit status. Shell exports and
+child process and propagates the child's exit status; unrelated parent
+environment variables remain inherited. Shell exports and
 `--reveal` are explicit plaintext exposure surfaces.

@@ -1,0 +1,2 @@
+# @schema: dsec/v1
+var | NAME | str | org/../dev | fallback | Traversal is invalid

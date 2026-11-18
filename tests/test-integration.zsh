@@ -54,6 +54,7 @@ chmod +x "$TMP/bin/security"
 
 export DSEC_TEST_KEYCHAIN=$KEYCHAIN
 export DSEC_HOME="$TMP/home/dsec"
+export EVAR_HOME="$TMP/home/evar"
 export PATH="$TMP/bin:${KCH_BIN:h}:$PATH"
 export KCH_BIN
 cat > "$TMP/secret.dsec" <<'EOF'

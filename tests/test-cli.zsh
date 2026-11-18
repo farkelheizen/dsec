@@ -8,43 +8,13 @@ TMP=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/dsec-test.XXXXXX") || exit 1
 trap '/bin/rm -rf "$TMP"' EXIT
 
 export DSEC_HOME="$TMP/dsec"
-export ENVC_CONFIG_DIR="$TMP/envc"
+export EVAR_HOME="$TMP/evar"
 export KCH_MOCK_STORE="$TMP/keychain"
+export EVAR_MOCK_LOG="$TMP/evar.log"
 export PATH="$TMP/bin:$PATH"
-mkdir -p "$TMP/bin" "$ENVC_CONFIG_DIR/project" "$ENVC_CONFIG_DIR/extra" "$DSEC_HOME/profiles" "$KCH_MOCK_STORE"
-
-cat > "$TMP/bin/envc" <<'EOF'
-#!/bin/zsh
-emulate -L zsh
-setopt extendedglob
-root=${ENVC_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}}
-target_path() {
-  local target=$1 app profile
-  if [[ $target == */* ]]; then app=${target%%/*}; profile=${target#*/}; else app=$target; profile=default; fi
-  print -r -- "$root/$app/$profile.env"
-}
-case ${1-} in
-  path)
-    shift
-    exists=0
-    if [[ ${1-} == --exists || ${1-} == -e ]]; then exists=1; shift; fi
-    for target in "$@"; do
-      path=$(target_path "$target")
-      if (( exists )) && [[ ! -f $path || -L $path ]]; then exit 1; fi
-      print -r -- "$path"
-    done
-    ;;
-  env)
-    shift
-    for target in "$@"; do
-      path=$(target_path "$target")
-      [[ -f $path && ! -L $path ]] || exit 1
-      /bin/cat "$path"
-    done
-    ;;
-  *) exit 2 ;;
-esac
-EOF
+unset FEATURE_FLAG
+mkdir -p "$TMP/bin" "$EVAR_HOME" "$DSEC_HOME/profiles" "$KCH_MOCK_STORE"
+cp "$ROOT/tests/mock-evar.zsh" "$TMP/bin/evar"
 cat > "$TMP/bin/kch" <<'EOF'
 #!/bin/zsh
 emulate -L zsh
@@ -60,7 +30,7 @@ case $1 in
   *) exit 2 ;;
 esac
 EOF
-chmod +x "$TMP/bin/envc" "$TMP/bin/kch"
+chmod +x "$TMP/bin/evar" "$TMP/bin/kch"
 
 pass=0
 failures=0
@@ -88,31 +58,24 @@ assert_status() {
 contains() { [[ $1 == *"$2"* ]]; }
 not_contains() { [[ $1 != *"$2"* ]]; }
 
-"$ROOT/dsec" --version | grep -q '^dsec '
-assert_status 'version output' 0 $?
+[[ $("$ROOT/dsec" --version) == 'dsec 0.1.2' && $("$ROOT/dsec" -V) == 'dsec 0.1.2' ]]
+assert_status 'both version options report 0.1.2' 0 $?
 
-cat > "$ENVC_CONFIG_DIR/project/base.env" <<'EOF'
-export HOST='db.example.test'
-export FEATURE_FLAG='true'
-EOF
-cat > "$ENVC_CONFIG_DIR/project/app.env" <<'EOF'
-export PORT='5433'
-export ORDERED='stored'
-export ORDERED_CONST='stored'
-EOF
-cat > "$ENVC_CONFIG_DIR/project/order.env" <<'EOF'
-export ORDERED='included'
-export ORDERED_CONST='included'
-EOF
-cat > "$ENVC_CONFIG_DIR/project/dev.env" <<'EOF'
-export RUNTIME='runtime-value'
-EOF
+print -r -- 'db.example.test' | evar set project/base HOST --stdin
+print -r -- 'true' | evar set project/base FEATURE_FLAG --stdin
+print -r -- '5433' | evar set project/app PORT --stdin
+print -r -- 'stored' | evar set project/app ORDERED --stdin
+print -r -- 'stored' | evar set project/app ORDERED_CONST --stdin
+print -r -- 'included' | evar set project/order ORDERED --stdin
+print -r -- 'included' | evar set project/order ORDERED_CONST --stdin
+print -r -- 'runtime-value' | evar set project/dev RUNTIME --stdin
 print -rn -- 'synthetic-secret-value' > "$KCH_MOCK_STORE/db-password"
 cat > "$TMP/main.dsec" <<'EOF'
 # @schema: dsec/v1
 note | Synthetic integration profile.
 source | project/base | req | Base values
 var | PORT | int[1024..65535] | project/app | 5432 | Database port
+var | HOST | str | | | Source value
 secret | DB_PASSWORD | str? | db-password | Database password
 const | SCHEME | postgres | URI scheme
 EOF
@@ -129,18 +92,31 @@ assert 'inspect masks secret values' contains "$inspect" '********'
 assert 'inspect does not reveal the synthetic secret' not_contains "$inspect" 'synthetic-secret-value'
 
 revealed=$("$ROOT/dsec" inspect main --reveal 2>&1)
-[[ $revealed == *'EXPORTED VARIABLE'* ]] || print -u2 -r -- "reveal output: $revealed"
 assert 'reveal is explicit' contains "$revealed" 'synthetic-secret-value'
 
 run_output=$("$ROOT/dsec" run main -- /usr/bin/env 2>/dev/null)
 assert 'run exports declared variable values' contains "$run_output" 'PORT=5433'
+assert 'run inherits the declared source variable' contains "$run_output" 'HOST=db.example.test'
+assert 'run does not import undeclared source variables' not_contains "$run_output" 'FEATURE_FLAG='
 assert 'run exports declared constants' contains "$run_output" 'SCHEME=postgres'
+exports=$("$ROOT/dsec" export main 2>&1)
+assert 'export does not import undeclared source variables' not_contains "$exports" 'FEATURE_FLAG='
+
+"$ROOT/dsec" set main HOST 'space = - value' >/dev/null 2>&1
+[[ $(<"$EVAR_HOME/project/base/_/HOST") == 'space = - value' ]]
+assert_status 'set writes inherited scope values through stdin' 0 $?
+[[ $(evar get -n -- project/base HOST) == 'space = - value' ]]
+assert_status 'set preserves spaces and equals' 0 $?
+grep -q '^set project/base/_ HOST$' "$EVAR_MOCK_LOG"
+assert_status 'set uses the normalized inherited scope' 0 $?
+grep -q '^get project/app/_ PORT$' "$EVAR_MOCK_LOG"
+assert_status 'get uses the normalized explicit scope' 0 $?
 
 set_output=$("$ROOT/dsec" set main PORT 6001 2>&1)
 [[ $set_output == *'Set PORT'* ]] || print -u2 -r -- "set output: $set_output"
 assert 'set routes declared variables to the configured scope' contains "$set_output" 'Set PORT'
-[[ $(<"$ENVC_CONFIG_DIR/project/app.env") == *"export PORT='6001'"* ]]
-assert_status 'set safely updates a static scope assignment' 0 $?
+[[ $(<"$EVAR_HOME/project/app/_/PORT") == 6001 ]]
+assert_status 'set writes the declared value to evar' 0 $?
 
 cat > "$TMP/phases.dsec" <<'EOF'
 # @schema: dsec/v1
@@ -184,7 +160,7 @@ cat > "$TMP/template.dsec" <<'EOF'
 note | Configured for {{ENV}}.
 source | project/{{ENV}} | req | Environment values
 const | LABEL | {{CUSTOM}} | Local label
-var | RUNTIME | str | project/{{ENV}} | | Runtime interpolation
+var | RUNTIME | str | | | Runtime interpolation
 EOF
 template_init=$("$ROOT/dsec" init templated "$TMP/template.dsec" --env dev --var 'CUSTOM=left|right' 2>&1)
 template_init_status=$?
@@ -196,11 +172,10 @@ assert 'template profile resolves runtime values from source scope' contains "$t
 template_export=$("$ROOT/dsec" export-template templated 2>&1)
 assert 'template export restores literal placeholders and metadata' contains "$template_export" '@template_id: service-{{ENV}}'
 assert 'template export restores source placeholder directives' contains "$template_export" 'source | project/{{ENV}}'
+assert 'template export preserves inherited var scope' contains "$template_export" 'var | RUNTIME | str | | | Runtime interpolation'
 [[ $(/usr/bin/grep '^# @vars:' "$DSEC_HOME/profiles/templated.dsec") == *'CUSTOM=left\|right'* ]]
 assert_status 'substitution metadata escapes separators' 0 $?
-cat > "$ENVC_CONFIG_DIR/project/prod.env" <<'EOF'
-export RUNTIME='prod-value'
-EOF
+print -r -- 'prod-value' | evar set project/prod RUNTIME --stdin
 reinit_output=$("$ROOT/dsec" init templated --env prod 2>&1)
 reinit_status=$?
 (( reinit_status == 0 )) || print -u2 -r -- "$reinit_output"
@@ -209,13 +184,10 @@ reinit_run=$("$ROOT/dsec" run templated -- /usr/bin/env 2>/dev/null)
 assert 'reinitialization applies new source values for templated variables' contains "$reinit_run" 'RUNTIME=prod-value'
 assert 'reinitialization preserves explicit placeholder mappings' contains "$reinit_run" 'LABEL=left|right'
 
-mkdir -p "$ENVC_CONFIG_DIR/myapp"
 for environment in dev test; do
-  cat > "$ENVC_CONFIG_DIR/myapp/$environment.env" <<EOF
-export MYAPP_MCP_BASE_URL='https://$environment.example.test'
-export MYAPP_GOOGLE_CLIENT_ID='$environment-client-id'
-export FASTMCP_HOME='/synthetic/$environment'
-EOF
+  print -r -- "https://$environment.example.test" | evar set "example/myapp/$environment" MYAPP_MCP_BASE_URL --stdin
+  print -r -- "$environment-client-id" | evar set "example/myapp/$environment" MYAPP_GOOGLE_CLIENT_ID --stdin
+  print -r -- "/synthetic/$environment" | evar set "example/myapp/$environment" FASTMCP_HOME --stdin
   for alias_suffix in google-client-secret mcp-signing-key google-allowed-emails; do
     print -rn -- "synthetic-$environment-$alias_suffix" > "$KCH_MOCK_STORE/myapp-$environment-$alias_suffix"
   done
@@ -317,14 +289,144 @@ assert_status 'malformed type constraints are rejected' 1 "$invalid_status"
 
 wrapper=$(zsh -f -c '
   source "$1/dsec.plugin.zsh"
+  unset FEATURE_FLAG
   ORIGINAL=before
   PORT=preexisting
   dsec load main || exit
-  [[ $PORT == 6001 && $ORIGINAL == before ]] || exit 4
+  [[ $PORT == 6001 && $ORIGINAL == before && ! ${+FEATURE_FLAG} -eq 1 ]] || exit 4
   dsec unload || exit
   [[ $PORT == preexisting && $ORIGINAL == before ]] || exit 5
 ' _ "$ROOT" 2>&1)
 assert_status 'wrapper load and unload tracks changed variables' 0 $?
+
+cat > "$TMP/inheritance.dsec" <<'EOF'
+# @schema: dsec/v1
+var | HOST | str | | | Inherited even when source comes later
+source | project/base/_ | req | Explicit default slot
+var | ORDERED | str | project/app | fallback | Override the source
+EOF
+"$ROOT/dsec" init inheritance "$TMP/inheritance.dsec" >/dev/null 2>&1
+assert_status 'inheritance works when source follows var' 0 $?
+inherited=$("$ROOT/dsec" run inheritance -- /usr/bin/env 2>&1)
+assert 'inherited value uses the source scope' contains "$inherited" 'HOST=space = - value'
+assert 'explicit var scope overrides source scope' contains "$inherited" 'ORDERED=stored'
+assert 'source listing does not populate undeclared names' not_contains "$inherited" 'FEATURE_FLAG='
+
+cat > "$DSEC_HOME/profiles/optional-source.dsec" <<'EOF'
+# @schema: dsec/v1
+source | project/missing | opt | Missing optional scope
+var | FALLBACK | str | | default-value | Inherited missing variable
+var | OPTIONAL | str? | | | Optional missing variable
+EOF
+optional=$("$ROOT/dsec" export optional-source 2>&1)
+assert_status 'missing optional source permits declared defaults' 0 $?
+assert 'missing inherited value uses its default' contains "$optional" 'default-value'
+assert 'missing optional variable is omitted' not_contains "$optional" 'OPTIONAL='
+sed 's/| opt |/| req |/' "$DSEC_HOME/profiles/optional-source.dsec" > "$DSEC_HOME/profiles/required-source.dsec"
+required_status=0
+"$ROOT/dsec" export required-source >/dev/null 2>&1 || required_status=$?
+assert_status 'missing required source is a validation error' 2 "$required_status"
+
+cat > "$DSEC_HOME/profiles/missing-variable.dsec" <<'EOF'
+# @schema: dsec/v1
+source | project/base | opt | Existing source
+var | ABSENT | str | | | Required missing variable
+EOF
+missing_status=0
+"$ROOT/dsec" export missing-variable >/dev/null 2>&1 || missing_status=$?
+assert_status 'optional source does not make variables optional' 2 "$missing_status"
+
+for scope in legacy /project/app project//app project/app/ project/../dev project/app/v. project/_ project/app/-dev CON/app project/app/COM1 project/app/dev/extra; do
+  printf '# @schema: dsec/v1\nvar | NAME | str | %s | fallback | Invalid scope\n' "$scope" > "$TMP/invalid-scope.dsec"
+  : > "$EVAR_MOCK_LOG"
+  invalid_scope_status=0
+  "$ROOT/dsec" init bad-scope "$TMP/invalid-scope.dsec" >/dev/null 2>&1 || invalid_scope_status=$?
+  assert_status "invalid scope is rejected before backend: $scope" 1 "$invalid_scope_status"
+  [[ ! -s $EVAR_MOCK_LOG && ! -e "$DSEC_HOME/profiles/bad-scope.dsec" ]]
+  assert_status "invalid scope has no backend or profile side effect: $scope" 0 $?
+done
+cat > "$TMP/no-source.dsec" <<'EOF'
+# @schema: dsec/v1
+var | NAME | str | | fallback | No source
+EOF
+: > "$EVAR_MOCK_LOG"
+no_source_status=0
+"$ROOT/dsec" init no-source "$TMP/no-source.dsec" >/dev/null 2>&1 || no_source_status=$?
+assert_status 'empty var scope without a source is rejected' 1 "$no_source_status"
+[[ ! -s $EVAR_MOCK_LOG && ! -e "$DSEC_HOME/profiles/no-source.dsec" ]]
+assert_status 'empty scope error has no backend or profile side effect' 0 $?
+
+long_segment=${(l:64::a:)}
+printf '# @schema: dsec/v1\nsource | %s/app | opt | Maximum segment\n' "$long_segment" > "$TMP/long-scope.dsec"
+"$ROOT/dsec" init long-scope "$TMP/long-scope.dsec" >/dev/null 2>&1
+assert_status '64-character scope segment is accepted' 0 $?
+printf '# @schema: dsec/v1\nsource | %sa/app | opt | Oversized segment\n' "$long_segment" > "$TMP/long-scope.dsec"
+: > "$EVAR_MOCK_LOG"
+long_scope_status=0
+"$ROOT/dsec" init too-long "$TMP/long-scope.dsec" >/dev/null 2>&1 || long_scope_status=$?
+assert_status '65-character scope segment is rejected' 1 "$long_scope_status"
+[[ ! -s $EVAR_MOCK_LOG && ! -e "$DSEC_HOME/profiles/too-long.dsec" ]]
+assert_status 'oversized scope has no backend or profile side effect' 0 $?
+
+cat > "$TMP/invalid-template-scope.dsec" <<'EOF'
+# @schema: dsec/v1
+source | project/app/{{ENV}} | opt | Substituted scope
+EOF
+: > "$EVAR_MOCK_LOG"
+template_scope_status=0
+"$ROOT/dsec" init invalid-template "$TMP/invalid-template-scope.dsec" --env '../invalid' >/dev/null 2>&1 || template_scope_status=$?
+assert_status 'substituted invalid scope is rejected' 1 "$template_scope_status"
+[[ ! -s $EVAR_MOCK_LOG && ! -e "$DSEC_HOME/profiles/invalid-template.dsec" ]]
+assert_status 'invalid substituted scope has no backend or profile side effect' 0 $?
+
+printf '# @schema: dsec/v1\nvar | NAME | str | project/app | \364\220\200\200 | Invalid encoding\n' > "$TMP/invalid-default.dsec"
+: > "$EVAR_MOCK_LOG"
+default_encoding_status=0
+"$ROOT/dsec" init invalid-default "$TMP/invalid-default.dsec" >/dev/null 2>&1 || default_encoding_status=$?
+assert_status 'invalid UTF-8 default is rejected' 2 "$default_encoding_status"
+[[ ! -s $EVAR_MOCK_LOG && ! -e "$DSEC_HOME/profiles/invalid-default.dsec" ]]
+assert_status 'invalid default has no backend or profile side effect' 0 $?
+
+for operation in exists list get; do
+  failure_status=0
+  EVAR_MOCK_FAIL=$operation "$ROOT/dsec" export main >"$TMP/failure.out" 2>&1 || failure_status=$?
+  assert_status "evar $operation failure is a backend error" 3 "$failure_status"
+  [[ $(<"$TMP/failure.out") != *'db.example.test'* && $(<"$TMP/failure.out") != *'synthetic-secret-value'* ]]
+  assert_status "evar $operation failure does not expose values" 0 $?
+done
+usage_failure=0
+EVAR_MOCK_USAGE_FAIL=exists "$ROOT/dsec" export main >/dev/null 2>&1 || usage_failure=$?
+assert_status 'evar exit 1 with diagnostics is not treated as missing' 3 "$usage_failure"
+for malformed in malformed duplicate unterminated; do
+  malformed_status=0
+  EVAR_MOCK_BAD_LIST=$malformed "$ROOT/dsec" export main >/dev/null 2>&1 || malformed_status=$?
+  assert_status "$malformed evar list output is a backend error" 3 "$malformed_status"
+done
+bad_get_status=0
+EVAR_MOCK_BAD_GET=1 "$ROOT/dsec" export main >/dev/null 2>&1 || bad_get_status=$?
+assert_status 'multiline evar get output is a backend error' 3 "$bad_get_status"
+write_failure=0
+EVAR_MOCK_FAIL=set "$ROOT/dsec" set main PORT 6002 >/dev/null 2>&1 || write_failure=$?
+assert_status 'evar set failure is a backend error' 3 "$write_failure"
+[[ $(<"$EVAR_HOME/project/app/_/PORT") == 6001 ]]
+assert_status 'failed evar set leaves existing value intact' 0 $?
+newline_status=0
+"$ROOT/dsec" set main HOST $'bad\nvalue' >/dev/null 2>&1 || newline_status=$?
+assert_status 'multiline non-secret writes are rejected' 2 "$newline_status"
+: > "$EVAR_MOCK_LOG"
+encoding_status=0
+"$ROOT/dsec" set main HOST $'\xf4\x90\x80\x80' >/dev/null 2>&1 || encoding_status=$?
+assert_status 'invalid Unicode is rejected before evar writes' 2 "$encoding_status"
+[[ ! -s $EVAR_MOCK_LOG ]]
+assert_status 'invalid Unicode never reaches evar' 0 $?
+"$ROOT/dsec" set main HOST $'\u2603' >/dev/null 2>&1
+unicode_status=$?
+assert_status 'valid Unicode is accepted by evar writes' 0 "$unicode_status"
+[[ $(<"$EVAR_HOME/project/base/_/HOST") == $'\u2603' ]]
+assert_status 'valid Unicode is preserved' 0 $?
+missing_evar_status=0
+PATH=/usr/bin:/bin:/usr/sbin:/sbin "$ROOT/dsec" export optional-source >/dev/null 2>&1 || missing_evar_status=$?
+assert_status 'missing evar is a backend error' 3 "$missing_evar_status"
 
 print -r -- "$pass checks passed; $failures failed"
 (( failures == 0 ))

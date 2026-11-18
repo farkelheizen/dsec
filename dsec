@@ -4,21 +4,20 @@ emulate -L zsh
 setopt extendedglob pipefail
 unsetopt err_exit
 
-readonly DSEC_VERSION=0.1.1
+readonly DSEC_VERSION=0.1.2
 readonly DSEC_SCHEMA=dsec/v1
 readonly DSEC_US=$'\x1f'
 
 typeset -g DSEC_HOME_ROOT DSEC_PROFILES_DIR DSEC_TEMPLATES_DIR
 typeset -ga REC_KIND REC_F1 REC_F2 REC_F3 REC_F4 REC_F5 REC_F6 REC_LINE
 typeset -ga NOTE_TEXT
-typeset -ga DRIVER_KEYS
 typeset -ga DSEC_TEMP_FILES
-typeset -gA META TEMPLATE_VARS DRIVER_VALUES VAL_MAP SRC_MAP SHADOW_MAP
+typeset -gA META TEMPLATE_VARS VAL_MAP SRC_MAP SHADOW_MAP
 typeset -gA SECRET_FLAG TYPE_MAP DECL_KIND DECL_SCOPE DECL_ALIAS DECL_TYPE DECL_DESC
 typeset -gA FILE_DECL_KIND FILE_DECL_SCOPE FILE_DECL_ALIAS FILE_DECL_TYPE FILE_DECL_DESC
 typeset -gA PARSED_VARS
 typeset -gA EXPLICIT_VARS USED_NAMES ORIGINAL_SOURCE
-typeset -g STRICT_REQUIRED=0 REPLY_NAME=''
+typeset -g STRICT_REQUIRED=0 SOURCE_SCOPE=''
 typeset -gA DSEC_PARENT_VALUES DSEC_LOADED_VALUES
 typeset -ga DSEC_LOADED_NAMES
 
@@ -57,6 +56,7 @@ Commands:
   help                              Show this help
 
 Profiles are stored in ${DSEC_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/dsec}.
+Non-secret variables use evar; source scopes do not import undeclared names.
 Run 'dsec help' for command details. Secrets are masked unless --reveal is used.
 EOF
 }
@@ -151,6 +151,7 @@ reset_manifest() {
 parse_manifest() {
   local file_path=$1 line line_no=0 key value kind field_count i seen_source=0
   reset_manifest
+  SOURCE_SCOPE=''
   while IFS= read -r line || [[ -n $line ]]; do
     (( line_no++ ))
     [[ $line != *$'\r'* ]] || fail 1 "$file_path:$line_no: carriage returns are not supported"
@@ -184,14 +185,17 @@ parse_manifest() {
         seen_source=1
         valid_scope "$FIELDS[2]" || fail 1 "$file_path:$line_no: invalid scope ID '$FIELDS[2]'"
         [[ $FIELDS[3] == req || $FIELDS[3] == opt ]] || fail 1 "$file_path:$line_no: source mode must be req or opt"
+        SOURCE_SCOPE=$FIELDS[2]
         REC_KIND+=(source); REC_F1+=("$FIELDS[2]"); REC_F2+=("$FIELDS[3]"); REC_F3+=("$FIELDS[4]"); REC_F4+=(''); REC_F5+=(''); REC_F6+=(''); REC_LINE+=("$line_no")
         ;;
       var)
         (( field_count == 6 )) || fail 1 "$file_path:$line_no: var requires exactly 6 columns"
         valid_env "$FIELDS[2]" || fail 1 "$file_path:$line_no: invalid environment variable '$FIELDS[2]'"
         valid_type "$FIELDS[3]" || fail 1 "$file_path:$line_no: invalid type specification for '$FIELDS[2]'"
-        valid_scope "$FIELDS[4]" || fail 1 "$file_path:$line_no: invalid scope ID '$FIELDS[4]'"
+        valid_evar_variable "$FIELDS[2]" || fail 1 "$file_path:$line_no: invalid non-secret variable name '$FIELDS[2]'"
+        [[ -z $FIELDS[4] ]] || valid_scope "$FIELDS[4]" || fail 1 "$file_path:$line_no: invalid scope ID '$FIELDS[4]'"
         [[ $FIELDS[5] != *$'\n'* ]] || fail 1 "$file_path:$line_no: multiline defaults are not supported"
+        valid_evar_value "$FIELDS[5]" || fail 2 "$file_path:$line_no: default for '$FIELDS[2]' is not single-line UTF-8"
         [[ -z $FIELDS[5] ]] || validate_value "$FIELDS[3]" "$FIELDS[5]" ||
           fail 2 "$file_path:$line_no: default for '$FIELDS[2]' does not match '$FIELDS[3]'"
         [[ ! ${+FILE_DECL_KIND[$FIELDS[2]]} -eq 1 ]] || fail 1 "$file_path:$line_no: duplicate declaration '$FIELDS[2]'"
@@ -220,6 +224,11 @@ parse_manifest() {
         ;;
     esac
   done < "$file_path"
+  for (( i = 1; i <= ${#REC_KIND}; i++ )); do
+    if [[ ${REC_KIND[i]} == var && -z ${REC_F3[i]} && -z $SOURCE_SCOPE ]]; then
+      fail 1 "$file_path:${REC_LINE[i]}: empty var scope requires a source directive"
+    fi
+  done
   [[ ${META[schema]-} == $DSEC_SCHEMA ]] || fail 1 "$file_path: unsupported or missing schema"
   if (( ${+META[id]} )); then
     valid_id "${META[id]}" || fail 1 "$file_path: invalid @id metadata"
@@ -237,9 +246,35 @@ parse_manifest() {
 }
 
 valid_scope() {
-  local scope=$1
-  [[ $scope =~ '^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)?$' ]] &&
-    [[ ${scope%%/*} != . && ${scope%%/*} != .. && ${scope##*/} != . && ${scope##*/} != .. ]]
+  local scope=$1 part
+  local -a parts
+  [[ -n $scope && $scope != /* && $scope != */ && $scope != *//* ]] || return 1
+  parts=("${(@s:/:)scope}")
+  (( ${#parts} == 2 || ${#parts} == 3 )) || return 1
+  for part in "${parts[@]:0:2}"; do
+    valid_scope_segment "$part" || return 1
+  done
+  (( ${#parts} == 2 )) || [[ ${parts[3]} == _ ]] || valid_scope_segment "${parts[3]}"
+}
+
+valid_scope_segment() {
+  [[ $1 =~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' && $1 != *. ]] &&
+    ! reserved_device_name "$1"
+}
+
+reserved_device_name() {
+  local stem=${1%%.*}
+  [[ ${(U)stem} == (CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]) ]]
+}
+
+valid_evar_variable() {
+  [[ $1 =~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$' ]] && ! reserved_device_name "$1"
+}
+
+normalize_scope() {
+  REPLY=$1
+  [[ ${1//[^\/]/} == / ]] && REPLY+=/_
+  return 0
 }
 
 parse_vars_metadata() {
@@ -434,150 +469,82 @@ read_input_value() {
 
 backend_fail() { fail 3 "$*" }
 
-# The only platform-specific boundary: envc and kch are called here.
-driver_scope_exists() {
-  local scope=$1 resolved_file
-  command -v envc >/dev/null 2>&1 || backend_fail "envc is not installed; required for scope '$scope'"
-  resolved_file=$(envc path "$scope" 2>/dev/null) || backend_fail "could not resolve configuration scope '$scope'"
-  [[ ! -L $resolved_file ]] || backend_fail "refusing symlinked scope '$scope'"
-  [[ -f $resolved_file ]]
-}
-
-driver_scope_exports() {
-  local scope=$1
-  command -v envc >/dev/null 2>&1 || backend_fail "envc is not installed; required for scope '$scope'"
-  REPLY=$(envc env "$scope") || backend_fail "could not read configuration scope '$scope'"
-}
-
-driver_scope_load() {
-  local scope=$1 line name tmp script
-  driver_scope_exports "$scope"
-  local exports=$REPLY
-  DRIVER_KEYS=()
-  DRIVER_VALUES=()
-  for line in ${(f)exports}; do
-    if [[ $line =~ '^export[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)=' ]]; then
-      name=${match[1]}
-      (( ${DRIVER_KEYS[(Ie)$name]} )) || DRIVER_KEYS+=("$name")
-    else
-      backend_fail "envc returned unsupported output for scope '$scope'"
-    fi
-  done
-  (( ${#DRIVER_KEYS} )) || return 0
-  tmp=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/dsec-env.XXXXXX") || backend_fail "could not create temporary file"
-  script='eval "$1"; shift; for n in "$@"; do if (( ${+parameters[$n]} )); then printf "%s\0%s\0" "$n" "${(P)n}"; fi; done'
-  /usr/bin/env -i HOME="$HOME" USER="${USER:-}" PATH="$PATH" \
-    zsh -f -c "$script" dsec "$exports" "${DRIVER_KEYS[@]}" > "$tmp" ||
-    { /bin/rm -f "$tmp"; backend_fail "could not load configuration scope '$scope'"; }
-  local key value
-  while IFS= read -r -d '' key && IFS= read -r -d '' value; do
-    [[ $value != *$'\n'* && $value != *$'\r'* ]] ||
-      { /bin/rm -f "$tmp"; backend_fail "scope '$scope' contains a multiline value"; }
-    DRIVER_VALUES[$key]=$value
-  done < "$tmp"
-  /bin/rm -f "$tmp"
-}
-
-driver_var_get() {
-  local scope=$1 key=$2
-  driver_scope_exists "$scope" || return 1
-  driver_scope_load "$scope"
-  (( ${+DRIVER_VALUES[$key]} )) || return 1
-  REPLY=${DRIVER_VALUES[$key]}
-}
-
-static_assignment_line() {
-  local line=$1 rhs char i state=0
-  if [[ $line =~ '^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$' ]]; then
-    REPLY_NAME=${match[2]}
-    rhs=${match[3]}
-  else
-    return 1
-  fi
-  # Accept only inert literals and the writer's single-quote escaping form.
-  for (( i = 1; i <= ${#rhs}; i++ )); do
-    char=${rhs[i]}
-    if (( state )); then
-      if [[ $char == "'" ]]; then state=0; fi
-    else
-      if [[ $char == "'" ]]; then
-        state=1
-      elif [[ $char == '\' && ${rhs[i+1]-} == "'" ]]; then
-        (( i++ ))
-      elif [[ $char == [A-Za-z0-9_./:@,+%=-] ]]; then
-        :
-      else
-        return 1
-      fi
-    fi
-  done
-  (( ! state ))
-}
-
 shell_quote() {
   REPLY="'${1//\'/\'\\\'\'}'"
 }
 
+typeset -g EVAR_OUTPUT EVAR_ERROR EVAR_STATUS
+
+# Preserve trailing newlines and keep backend diagnostics away from the user.
+evar_call() {
+  local tmp result_status=0
+  command -v evar >/dev/null 2>&1 || backend_fail "evar is not installed"
+  tmp=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/dsec-evar.XXXXXX") || backend_fail "could not create temporary file"
+  DSEC_TEMP_FILES+=("$tmp")
+  EVAR_OUTPUT=$(command evar "$@" 2>"$tmp"; local result=$?; print -rn -- '.'; exit "$result") || result_status=$?
+  EVAR_OUTPUT=${EVAR_OUTPUT%?}
+  EVAR_ERROR=$(<"$tmp")
+  /bin/rm -f -- "$tmp" || backend_fail "could not remove temporary file"
+  DSEC_TEMP_FILES[-1]=()
+  EVAR_STATUS=$result_status
+}
+
+valid_evar_value() {
+  local -a results
+  [[ $1 != *$'\0'* && $1 != *[$'\r\n']* ]] || return 1
+  print -rn -- "$1" | /usr/bin/iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || return 1
+  print -rn -- "$1" | LC_ALL=C /usr/bin/grep -a -E $'\xf4[\x90-\xbf]|[\xf5-\xff]' >/dev/null 2>&1
+  results=("${pipestatus[@]}")
+  (( results[1] == 0 && results[2] == 1 ))
+}
+
+# The only platform-specific boundary: evar and kch are called here.
+driver_scope_exists() {
+  local scope=$1
+  normalize_scope "$scope"; scope=$REPLY
+  evar_call exists -- "$scope"
+  [[ -z $EVAR_OUTPUT ]] || backend_fail "evar returned unsupported output for scope '$scope'"
+  (( EVAR_STATUS == 0 )) && [[ -z $EVAR_ERROR ]] && return 0
+  (( EVAR_STATUS == 1 )) && [[ -z $EVAR_ERROR ]] && return 1
+  backend_fail "could not check configuration scope '$scope'"
+}
+
+driver_scope_load() {
+  local scope=$1 line name value
+  local -A seen
+  normalize_scope "$scope"; scope=$REPLY
+  evar_call list -- "$scope"
+  (( EVAR_STATUS == 0 )) && [[ -z $EVAR_ERROR ]] || backend_fail "could not enumerate configuration scope '$scope'"
+  [[ -z $EVAR_OUTPUT || $EVAR_OUTPUT == *$'\n' ]] || backend_fail "evar returned malformed listing for scope '$scope'"
+  EVAR_OUTPUT=${EVAR_OUTPUT%$'\n'}
+  for line in "${(@f)EVAR_OUTPUT}"; do
+    [[ $line == *=* ]] || backend_fail "evar returned malformed listing for scope '$scope'"
+    name=${line%%=*} value=${line#*=}
+    valid_evar_variable "$name" && valid_evar_value "$value" && (( ! ${+seen[$name]} )) ||
+      backend_fail "evar returned malformed listing for scope '$scope'"
+    seen[$name]=1
+  done
+}
+
+driver_var_get() {
+  local scope=$1 key=$2
+  normalize_scope "$scope"; scope=$REPLY
+  evar_call get -n -- "$scope" "$key"
+  if (( EVAR_STATUS == 1 )) && [[ -z $EVAR_OUTPUT && $EVAR_ERROR == "evar: not found: $scope/$key" ]]; then
+    return 1
+  fi
+  (( EVAR_STATUS == 0 )) && [[ -z $EVAR_ERROR ]] && valid_evar_value "$EVAR_OUTPUT" ||
+    backend_fail "could not read variable '$key' from scope '$scope'"
+  REPLY=$EVAR_OUTPUT
+}
+
 driver_var_set() {
-  local scope=$1 key=$2 value=$3 target_file expected_file envc_root app profile parent line found=0 mode=600 tmp
-  command -v envc >/dev/null 2>&1 || backend_fail "envc is not installed; cannot write scope '$scope'"
-  valid_env "$key" || fail 2 "invalid environment variable '$key'"
-  [[ $value != *$'\n'* && $value != *$'\r'* ]] || fail 2 "multiline values are not supported"
-  target_file=$(envc path "$scope") || backend_fail "could not resolve configuration scope '$scope'"
-  [[ $target_file == /* && $target_file == *.env ]] || backend_fail "envc returned an unsafe path for scope '$scope'"
-  valid_scope "$scope" || backend_fail "invalid configuration scope '$scope'"
-  envc_root=${ENVC_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}}
-  [[ $envc_root == /* ]] || envc_root="$PWD/$envc_root"
-  envc_root=${envc_root:A}
-  if [[ $scope == */* ]]; then
-    app=${scope%%/*}; profile=${scope#*/}
-  else
-    app=$scope; profile=default
-  fi
-  expected_file="$envc_root/$app/$profile.env"
-  [[ ${target_file:A} == ${expected_file:A} ]] || backend_fail "envc returned an out-of-scope path for '$scope'"
-  parent=${target_file:h}
-  [[ ! -L $parent && ( ! -e $parent || -d $parent ) ]] || backend_fail "refusing unsafe scope directory '$scope'"
-  (umask 077; /bin/mkdir -p "$parent") || backend_fail "could not create scope '$scope'"
-  [[ ! -L $parent && ! -L $target_file ]] || backend_fail "refusing symlinked scope '$scope'"
-  if [[ -e $target_file ]]; then
-    [[ -f $target_file && -r $target_file ]] || backend_fail "scope '$scope' is not a regular file"
-    mode=$(/usr/bin/stat -f '%Lp' "$target_file") || backend_fail "could not inspect scope '$scope'"
-    while IFS= read -r line || [[ -n $line ]]; do
-      if [[ $line =~ '^[[:space:]]*#' || -z ${line//[ $'\t']/} ]]; then
-        continue
-      fi
-      static_assignment_line "$line" ||
-        backend_fail "scope '$scope' contains dynamic or unsupported shell code; refusing to rewrite it"
-      [[ $REPLY_NAME == $key ]] && (( found++ ))
-    done < "$target_file"
-    (( found <= 1 )) || backend_fail "scope '$scope' contains duplicate assignments for '$key'"
-  else
-    mode=600
-  fi
-  tmp=$(/usr/bin/mktemp "$parent/.dsec-write.XXXXXX") || backend_fail "could not create a temporary scope file"
-  if [[ -e $target_file ]]; then /bin/cat "$target_file" > "$tmp" || { /bin/rm -f "$tmp"; backend_fail "could not copy scope '$scope'"; }; fi
-  local new_line
-  shell_quote "$value"
-  new_line="export $key=$REPLY"
-  if (( found )); then
-    local output=$(/usr/bin/mktemp "$parent/.dsec-lines.XXXXXX") || { /bin/rm -f "$tmp"; backend_fail "could not create temporary file"; }
-    while IFS= read -r line || [[ -n $line ]]; do
-      if static_assignment_line "$line" && [[ $REPLY_NAME == $key ]]; then
-        print -r -- "$new_line"
-        found=2
-      else
-        print -r -- "$line"
-      fi
-    done < "$target_file" > "$output"
-    /bin/cat "$output" > "$tmp"
-    /bin/rm -f "$output"
-  else
-    [[ ! -s $tmp ]] || print -r -- '' >> "$tmp"
-    print -r -- "$new_line" >> "$tmp"
-  fi
-  /bin/chmod "$mode" "$tmp" || { /bin/rm -f "$tmp"; backend_fail "could not secure temporary scope file"; }
-  /bin/mv -f "$tmp" "$target_file" || { /bin/rm -f "$tmp"; backend_fail "could not update scope '$scope'"; }
+  local scope=$1 key=$2 value=$3
+  valid_evar_value "$value" || fail 2 "non-secret values must be single-line UTF-8 without NUL"
+  normalize_scope "$scope"; scope=$REPLY
+  evar_call set "$scope" "$key" --stdin <<< "$value"
+  (( EVAR_STATUS == 0 )) && [[ -z $EVAR_OUTPUT && -z $EVAR_ERROR ]] ||
+    backend_fail "could not store variable '$key' in scope '$scope'"
 }
 
 driver_secret_get() {
@@ -649,21 +616,15 @@ resolve_one_profile() {
           scope=${REC_F1[i]} mode=${REC_F2[i]}
           if driver_scope_exists "$scope"; then
             driver_scope_load "$scope"
-            for name in "${DRIVER_KEYS[@]}"; do
-              valid_env "$name" || fail 2 "source scope '$scope' has invalid variable name '$name'"
-              (( ${+DRIVER_VALUES[$name]} )) || continue
-              set_value "$name" "${DRIVER_VALUES[$name]}" "$profile/source:$scope" 0 ''
-            done
           elif [[ $mode == req ]]; then
             fail 2 "required source scope '$scope' is missing"
           fi
           ;;
         2:var)
-          name=${REC_F1[i]} type=${REC_F2[i]} scope=${REC_F3[i]}
+          name=${REC_F1[i]} type=${REC_F2[i]} scope=${REC_F3[i]:-$SOURCE_SCOPE}
           DECL_KIND[$name]=var DECL_TYPE[$name]=$type DECL_SCOPE[$name]=$scope DECL_DESC[$name]=${REC_F5[i]}
           USED_NAMES[$name]=1
           if driver_var_get "$scope" "$name"; then value=$REPLY
-          elif (( ${+VAL_MAP[$name]} )); then value=${VAL_MAP[$name]}
           else value=''
           fi
           if [[ -n $value ]] && ! validate_value "$type" "$value"; then
@@ -839,7 +800,7 @@ cmd_set() {
   local kind=${FILE_DECL_KIND[$key]-} type=${FILE_DECL_TYPE[$key]-}
   [[ -n $kind ]] || fail 2 "undeclared variable '$key'; add a var or secret declaration first"
   case $kind in
-    var) scope=${FILE_DECL_SCOPE[$key]} ;;
+    var) scope=${FILE_DECL_SCOPE[$key]:-$SOURCE_SCOPE} ;;
     secret) alias=${FILE_DECL_ALIAS[$key]} secret_flag=1 ;;
     *) fail 1 "'$key' is not stored; only var and secret values can be set" ;;
   esac
@@ -937,20 +898,20 @@ atomic_write_profile() {
 }
 
 preflight_init_backends() {
-  local i kind scope path_output
+  local i kind scope
   for (( i = 1; i <= ${#REC_KIND}; i++ )); do
     kind=${REC_KIND[i]}
     case $kind in
       source)
         scope=${REC_F1[i]}
-        if [[ ${REC_F2[i]} == req ]] && ! driver_scope_exists "$scope"; then
+        if driver_scope_exists "$scope"; then
+          driver_scope_load "$scope"
+        elif [[ ${REC_F2[i]} == req ]]; then
           fail 2 "required source scope '$scope' is missing"
         fi
         ;;
       var)
-        command -v envc >/dev/null 2>&1 || backend_fail "envc is not installed; required for variable '${REC_F1[i]}'"
-        path_output=$(envc path "${REC_F3[i]}") || backend_fail "could not resolve variable scope '${REC_F3[i]}'"
-        [[ $path_output == /* && $path_output == *.env ]] || backend_fail "envc returned an unsafe path for scope '${REC_F3[i]}'"
+        command -v evar >/dev/null 2>&1 || backend_fail "evar is not installed; required for variable '${REC_F1[i]}'"
         ;;
       secret)
         command -v kch >/dev/null 2>&1 || backend_fail "kch is not installed; required for secret '${REC_F1[i]}'"
@@ -1108,7 +1069,7 @@ cmd_init() {
     case $kind in
       note) print -r -- "${REC_F1[i]}" ;;
       var)
-        name=${REC_F1[i]} type=${REC_F2[i]} scope=${REC_F3[i]} default=${REC_F4[i]}
+        name=${REC_F1[i]} type=${REC_F2[i]} scope=${REC_F3[i]:-$SOURCE_SCOPE} default=${REC_F4[i]}
         if (( ! force )) && driver_var_get "$scope" "$name" && validate_value "$type" "$REPLY"; then
           print -r -- "[ok] $name already set ($scope)"
           continue

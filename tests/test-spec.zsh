@@ -8,29 +8,13 @@ TMP=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/dsec-spec.XXXXXX") || exit 1
 trap '/bin/rm -rf "$TMP"' EXIT
 
 export DSEC_HOME="$TMP/dsec"
-export ENVC_CONFIG_DIR="$TMP/envc"
+export EVAR_HOME="$TMP/evar"
 export PATH="$TMP/bin:$PATH"
-mkdir -p "$DSEC_HOME" "$ENVC_CONFIG_DIR/project" "$TMP/bin"
-
-cat > "$TMP/bin/envc" <<'EOF'
-#!/bin/zsh
-root=${ENVC_CONFIG_DIR:?}
-case ${1-} in
-  path)
-    target=$2
-    if [[ $target == */* ]]; then app=${target%%/*}; profile=${target#*/}; else app=$target; profile=default; fi
-    print -r -- "$root/$app/$profile.env"
-    ;;
-  env)
-    target=$2
-    if [[ $target == */* ]]; then app=${target%%/*}; profile=${target#*/}; else app=$target; profile=default; fi
-    /bin/cat "$root/$app/$profile.env"
-    ;;
-  *) exit 2 ;;
-esac
-EOF
-chmod +x "$TMP/bin/envc"
-print -r -- "export MODE='dev'" > "$ENVC_CONFIG_DIR/project/app.env"
+mkdir -p "$DSEC_HOME" "$EVAR_HOME" "$TMP/bin"
+cp "$ROOT/tests/mock-evar.zsh" "$TMP/bin/evar"
+chmod +x "$TMP/bin/evar"
+print -r -- 'dev' | evar set project/app MODE --stdin
+print -r -- 'explicit' | evar set project/app EXPLICIT --stdin
 
 passed=0
 failed=0

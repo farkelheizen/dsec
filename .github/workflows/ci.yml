@@ -13,12 +13,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check Zsh syntax
-        run: zsh -n dsec dsec.plugin.zsh tests/test-cli.zsh tests/test-spec.zsh tests/test-integration.zsh
+        run: zsh -n dsec dsec.plugin.zsh tests/test-cli.zsh tests/test-spec.zsh tests/test-integration.zsh tests/test-evar-integration.zsh tests/mock-evar.zsh
       - name: Check whitespace
         run: git diff --check
       - name: Run CLI tests
         run: zsh tests/test-cli.zsh
       - name: Run specification fixtures
         run: zsh tests/test-spec.zsh
+      - name: Run isolated evar integration
+        run: zsh tests/test-evar-integration.zsh
       - name: Run isolated Keychain integration
         run: zsh tests/test-integration.zsh

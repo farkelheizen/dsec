@@ -1,0 +1,2 @@
+# @schema: dsec/v1
+var | NAME | str | | fallback | No source to inherit

@@ -2,7 +2,7 @@
 
 `dsec` (Declarative Secrets) is a local-first Zsh CLI for resolving
 self-documenting `.dsec` environment manifests. It stores non-secret values
-through `envc` and secrets through `kch` and the macOS Keychain. A manifest is
+through `evar` and secrets through `kch` and the macOS Keychain. A manifest is
 also a readable contract for contributors who do not install the optional
 tooling.
 
@@ -12,7 +12,8 @@ interactive developer workstations, not production secret management.
 ## Requirements
 
 - macOS with Zsh and the standard command-line tools used by the script.
-- `envc` for declared non-secret variables and `source` scopes.
+- `evar` for declared non-secret variables and `source` scopes (the
+  `0.1.0-dev` CLI contract).
 - `kch` for secret reads and writes.
 
 No third-party parser or language runtime is required.
@@ -45,7 +46,7 @@ Check the installed CLI version with:
 dsec --version
 ```
 
-Current release: `dsec 0.1.1`.
+Current release: `dsec 0.1.2`.
 
 ## Manifest
 
@@ -55,8 +56,9 @@ the complete portable format is documented in [`spec/SPEC.md`](spec/SPEC.md).
 ```text
 # @schema: dsec/v1
 note | Local development settings.
-source | acme/base | opt | Shared non-secret defaults
-var | API_URL | str | acme/service | http://localhost:8080 | Service endpoint
+source | acme/service/dev | opt | Environment configuration
+var | API_URL | str | | http://localhost:8080 | Service endpoint
+var | TZ | str | acme/global | UTC | Shared override
 secret | API_TOKEN | str | api-token | API credential
 const | API_VERSION | v1 | API version
 ```
@@ -66,6 +68,14 @@ const | API_VERSION | v1 | API version
 `bool`, and `path`. Add `?` to make a value optional. Keep secret values out
 of manifests, fixtures, and source control; only the Keychain alias belongs
 there.
+
+Scope IDs are `<org>/<module>` or `<org>/<module>/<version>`; the
+two-segment form selects version `_`. An empty `var` scope inherits the
+manifest's single `source` scope, regardless of record order. Without a
+`source`, every `var` needs an explicit scope. A `req` source must exist;
+an `opt` source may be absent. Source existence and enumeration do not
+import values: declare each variable the application needs. A nonempty
+`var` scope overrides the source for that variable.
 
 Initialize a profile from a manifest:
 
@@ -82,7 +92,7 @@ Templates are re-initialized by naming the stored profile or template.
 ### Example: separate MYAPP environments
 
 The value-free [`examples/myapp.dsec`](examples/myapp.dsec) template uses
-`{{ENV}}` to give each environment its own `envc` scope and Keychain aliases.
+`{{ENV}}` to give each environment its own `evar` scope and Keychain aliases.
 It also declares a `MYAPP_ENV` constant set to that environment name when
 the profile is initialized; constants need no backend or prompt.
 From the project directory, create profiles interactively:
@@ -94,7 +104,7 @@ dsec init myapp-test ./examples/myapp.dsec --env test
 
 Provide the values at the prompts; secret prompts do not echo input. The
 client secret, signing key, and allowed email list go into Keychain; the base
-URL, client ID, and FastMCP home go into `envc`. The home is a `str`, so it
+URL, client ID, and FastMCP home go into `evar`. The home is a `str`, so it
 may name a directory that does not exist yet. Existing valid backend values
 are reused without prompting.
 
@@ -141,8 +151,9 @@ dsec completions
   validates required values.
 - `set` routes declared values to their configured backend. Undeclared names
   are rejected; add a `var` or `secret` declaration to the manifest first.
-- `run` injects resolved values into the child process only and propagates
-  the child's exit status.
+- `run` injects resolved declarations into the child process only and
+  propagates the child's exit status. The child also inherits the parent
+  environment; dsec does not clear unrelated inherited variables.
 - `export` prints shell-quoted assignments. This output contains plaintext
   values and should be handled accordingly.
 - `export-template` emits the value-free source template using stored token
@@ -165,14 +176,36 @@ failures, and `3` for backend/driver failures.
 
 Profiles are stored in `DSEC_HOME/profiles/`; generated templates are stored
 in `DSEC_HOME/templates/`. Directories and profile writes use restrictive
-permissions and atomic replacement. The `envc` adapter rewrites only
-supported static assignments and rejects dynamic shell code rather than
-silently changing its behavior.
+permissions and atomic replacement. The evar adapter uses its CLI and treats
+registry values as data, not shell code. `evar` stores plaintext non-secret
+configuration; do not store secrets in it. Values can be exposed through
+filesystem access, command output, child environments, and backups.
 
-`envc` profiles are trusted Zsh code. Secrets
-may be exposed to authorized local processes, child processes, the current
+Secrets may be exposed to authorized local processes, child processes, the current
 shell when explicitly loaded, or anyone who receives plaintext export output.
 See [`SECURITY.md`](SECURITY.md) for the threat model and limitations.
+
+## Migrating from 0.1.1
+
+Version 0.1.2 deliberately changes the pre-1.0 `dsec/v1` contract. Existing
+envc data is neither migrated nor deleted. One-segment envc scope IDs are
+invalid, and two-segment envc IDs do not necessarily identify the same
+configuration in evar: evar treats them as `<org>/<module>/_`.
+
+1. Identify each trusted envc profile and choose an evar
+   `<org>/<module>[/<version>]` scope. envc profiles are Zsh code; do not
+   execute untrusted profiles.
+2. Copy only the needed non-secret values into evar using a trusted,
+   operator-controlled input method, without recording values in commands,
+   logs, or documentation. For example, with a value already available in a
+   shell variable, use `printf '%s\n' "$VALUE" | evar set acme/service/dev NAME --stdin`.
+   Do not copy Keychain secrets to evar.
+3. Update the manifest's scopes, declare every needed non-secret variable,
+   and reinitialize each profile from the updated manifest. Values previously
+   imported implicitly from a source now require `var` declarations.
+4. Verify the profile before retiring anything. Keep the existing envc data
+   until you explicitly decide what to do with it; dsec never falls back to
+   envc.
 
 The `.dsec` format and resolution engine are designed to be portable, but
 only the macOS storage drivers are implemented here. Linux/Windows backends,

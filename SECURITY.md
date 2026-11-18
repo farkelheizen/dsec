@@ -6,23 +6,22 @@ KMS, Vault, or another infrastructure secret service.
 
 ## Storage and trust
 
-The macOS implementation stores non-secret values through `envc` and secrets
-through `kch`/the macOS Keychain. `envc` profiles are trusted Zsh code; loading
-one can execute commands and modify the environment. The dsec writer accepts
-only static assignments it can safely preserve and rejects dynamic or
-ambiguous constructs.
+The macOS implementation stores non-secret values through `evar` and secrets
+through `kch`/the macOS Keychain. Evar stores plaintext data, not shell code.
+Filesystem access, backups, evar output, and child environments can expose
+those values. Never store secrets in evar. Legacy envc profiles are trusted
+Zsh code; do not execute an untrusted profile during migration.
 
 `.dsec` manifests contain schema, names, aliases, defaults, descriptions,
-constants, and mutation expressions. They must not contain actual secret
-values. Constants and mutations can still expose sensitive information at
-runtime. A mutation derived from a secret remains masked in `inspect` unless
-the user explicitly passes `--reveal`.
+and constants. They must not contain actual secret values. Constants can
+still expose sensitive information at runtime.
 
 ## Runtime exposure
 
 `dsec run` passes resolved values to the child process and descendants without
-changing the parent shell. Authorized local processes may be able to observe
-those values. The wrapper-backed `dsec load` and explicit `eval "$(dsec
+changing the parent shell. The child also inherits the parent environment.
+Authorized local processes may be able to observe those values. The
+wrapper-backed `dsec load` and explicit `eval "$(dsec
 export ...)"` paths intentionally place values in the current shell and make
 them available to later child processes.
 

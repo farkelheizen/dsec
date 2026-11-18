@@ -4,8 +4,8 @@
 
 - Keep `dsec` a self-contained Zsh CLI for the macOS reference
   implementation. Runtime dependencies are Zsh, macOS command-line tools,
-  `envc`, and `kch`; do not add a package manager or third-party parser.
-- Keep the manifest format independent of `envc` and `kch`. Integrate storage
+  `evar`, and `kch`; do not add a package manager or third-party parser.
+- Keep the manifest format independent of `evar` and `kch`. Integrate storage
   through the six driver functions so future Linux and Windows ports can
   replace only the platform adapters.
 - Follow the CLI, error-reporting, quoting, and completion patterns of the
@@ -18,16 +18,14 @@
 ## Manifest and security
 
 - Treat `.dsec` as a line-oriented, pipe-delimited format. Preserve regex-pipe
-  protection, metadata headers, placeholder substitution, type validation,
-  optional values, single-profile command behavior, provenance, and reversible
-  template placeholder behavior described in `spec/SPEC.md` and the local
-  `docs_local/dsec-project-plan-v1.1.md`.
+  protection, the schema header, the single reserved `{{TARGET}}` token,
+  type validation, optional values, declaration-only resolution, and the
+  stateless manifest behavior described in `spec/SPEC.md`.
 - Never print secret values in diagnostics, errors, tests, fixtures, logs, or
   generated documentation. `--reveal` must remain an explicit opt-in.
 - Use synthetic values only. Keep `const` exposure risks, environment
-  inheritance, Keychain access, and trusted `envc` profile
-  execution documented honestly; do not claim guaranteed IDE or LLM
-  isolation.
+  inheritance, plaintext evar storage, and Keychain access documented
+  honestly; do not claim guaranteed IDE or LLM isolation.
 - Do not position dsec as a server secret manager. It is for interactive
   developer workstations.
 
@@ -47,7 +45,7 @@
 - Put substantial or design-dependent plans in the ignored `docs_local/`
   directory. Treat those files as private and never add secrets to them.
 - Keep durable user-facing behavior in `README.md`, `SECURITY.md`, and
-  `CONTRIBUTING.md`. Keep the documentation structure aligned with `envc` and
+  `CONTRIBUTING.md`. Keep the documentation structure aligned with `evar` and
   `kch`.
 - Use `spec/SPEC.md` and the local project plan as the contract for manifest
   and CLI behavior; do not rely on untracked reference documents.
@@ -57,9 +55,9 @@
 - Run `zsh -n dsec tests/test-cli.zsh` and the targeted test suite for CLI
   changes. Run the isolated Keychain integration suite for secret-driver
   changes.
-- Tests must use temporary `DSEC_HOME`, isolated `ENVC_CONFIG_DIR`, mocked
-  `envc`/`kch` commands where appropriate, and synthetic values. Integration
-  tests must never use the user's default Keychain.
+- Tests must use temporary `EVAR_HOME`, mocked `evar`/`kch` commands where
+  appropriate, and synthetic values. Integration tests must never use the
+  user's default Keychain.
 - Validate all inputs before side effects, preserve explicit nonzero errors,
-  avoid broad catches and silent fallbacks, and ensure child processes receive
-  only the intended resolved environment.
+  avoid broad catches and silent fallbacks, and pass only declared resolved
+  values in addition to the documented inherited parent environment.

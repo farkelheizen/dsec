@@ -8,17 +8,19 @@ validation, resolution, masking, and exit-code behavior.
 
 A manifest is UTF-8, line-oriented text. Each non-comment record is
 pipe-delimited; horizontal whitespace around fields is ignored. Blank lines
-and ordinary comments are ignored. Every manifest starts with:
+and ordinary comments are ignored. Every manifest starts with exactly one
+schema header:
 
 ```text
 # @schema: dsec/v1
 ```
 
-The schema header is required exactly once. Metadata comments use
-`# @name: value`. Generated profiles may add profile IDs, timestamps,
-template identifiers, escaped substitution mappings, and token provenance.
-Unknown metadata is ignored by portable readers unless a future schema says
-otherwise.
+No profile, template, timestamp, or substitution-provenance metadata is
+written or interpreted. Other comment lines are ignored.
+
+The schema version identifies the manifest format, independently of the CLI
+release version. The format remains `dsec/v1` for CLI 0.1.3; change the schema
+only when an incompatible manifest contract change requires it.
 
 The five directives have exact column counts:
 
@@ -32,9 +34,9 @@ The five directives have exact column counts:
 
 Names use shell environment-variable syntax. A `var` name additionally uses
 1-128 ASCII letters, digits, or underscores, must not start with a digit,
-and must not be a reserved device name. Profile IDs are relative identifiers.
-A secret alias may be empty, in which case the variable name is used. Secrets
-must never be placed in manifests or fixtures.
+and must not be a reserved device name. A secret alias may be empty, in
+which case the variable name is used. Secrets must never be placed in
+manifests or fixtures.
 
 A scope ID is `<org>/<module>` or `<org>/<module>/<version>`. Organization,
 module, and version segments contain 1-64 ASCII letters, digits, `.`, `_`,
@@ -49,7 +51,7 @@ Pipes inside `/.../` regex type expressions and escaped `\|` are literal
 field content. Newlines in values are unsupported. Duplicate declarations
 within one manifest are invalid.
 
-## Types and placeholders
+## Types and target substitution
 
 Supported types are `str`, `str/<extended-regex>/`, `enum(a,b,c)`, `int`,
 `int[min..max]`, `float`, `float[min..max]`, `bool`, and `path`. A trailing
@@ -57,29 +59,42 @@ Supported types are `str`, `str/<extended-regex>/`, `enum(a,b,c)`, `int`,
 `yes`, and `no` case-insensitively. Paths expand a leading `~/` and must
 exist.
 
-`{{KEY}}` denotes a template placeholder. `init --env VALUE` supplies `ENV`;
-repeated `--var KEY=VALUE` supplies other keys. Unresolved placeholders in
-directives are prompted for interactively.
+`{{TARGET}}` is the only supported runtime token. It is substituted in
+memory from `-t TARGET` or `--target TARGET`; it can be used in any manifest
+text, including notes, constants, scopes, and secret aliases. A target must
+match `^[a-z0-9][a-z0-9_-]*$`. Target and token must be used together: a
+manifest containing `{{TARGET}}` without a target fails, and supplying a
+target to a manifest without the token also fails. Any other or malformed
+double-brace token fails. The source manifest is never modified.
 
-## Resolution
+## Resolution and initialization
 
-For each profile:
+Manifest commands use an explicit manifest path or default to `./.dsec`.
+`init` may read `-` from standard input; other commands require a file path.
 
-1. Check the `source` scope, if present. A `req` scope must exist; an `opt`
+For each invocation:
+
+1. Load and substitute the manifest, then validate the complete schema and
+   declarations before accessing a storage backend.
+2. Check the `source` scope, if present. A `req` scope must exist; an `opt`
    scope may be absent. Enumerate and validate a present scope without
    importing its values.
-2. Resolve declared `var` and `secret` values, including defaults. An empty
-   `var` scope inherits the source scope; without a source it is invalid.
-   A nonempty `var` scope overrides the source for that declaration. The
-   source mode does not change whether individual values are required.
-3. Apply `const` declarations.
+3. Resolve only declared `var` and `secret` values. An empty `var` scope
+   inherits the source scope; without a source it is invalid. A nonempty
+   `var` scope overrides the source for that declaration. The source mode
+   does not change whether individual values are required.
+4. Apply `const` declarations.
+
+`init` is a validation-and-provisioning command, not a profile generator. It
+reuses valid stored values, writes declared defaults when values are absent,
+and prompts for missing required values. Optional unset values may remain
+unset. Variable values go through evar and secrets through Keychain. No
+profile, cache, or generated manifest is written.
 
 `set` rejects undeclared names; values may be written only for manifest
-entries declared as `var` or `secret`.
-
-Inspection masks secret-derived values unless `--reveal` is explicitly
-supplied. Optional unset values are omitted; required values are validated
-before child startup or export output.
+entries declared as `var` or `secret`. Inspection masks secret-derived values
+unless `--reveal` is explicitly supplied. Optional unset values are omitted;
+required values are validated before child startup or export output.
 
 ## Storage boundary
 
@@ -91,15 +106,26 @@ silently treated as missing values.
 
 The reference adapter accesses evar only through its CLI. It does not import
 undeclared variables, evaluate storage as shell code, or fall back to envc.
-Non-secret values are single-line UTF-8 without NUL or CR. Profile files are
-written atomically with restrictive permissions.
+Non-secret values are single-line UTF-8 without NUL or CR. Evar stores
+plaintext non-secret configuration; it is not a secret store.
 
 ## CLI and exit codes
 
 The reference CLI provides `init`, `inspect`, `set`, `run`, `export`,
-`export-template`, `docs`/`render`, and completion output. `load`/`unload`
-are supplied by the sourced Zsh wrapper; a standalone executable cannot
-mutate its caller's environment.
+`docs`/`render`, and completion output. `load`/`unload` are supplied by the
+sourced Zsh wrapper; a standalone executable cannot mutate its caller's
+environment. Each command accepts an optional manifest path and the target
+option when the manifest contains `{{TARGET}}`:
+
+```text
+dsec init [manifest|-] [-t|--target TARGET]
+dsec inspect [manifest] [-t|--target TARGET] [--check] [--reveal]
+dsec set [manifest] [-t|--target TARGET] <ENV_VAR> [value]
+dsec run [manifest] [-t|--target TARGET] -- <command> [args...]
+dsec export [manifest] [-t|--target TARGET]
+dsec load [manifest] [-t|--target TARGET]
+dsec docs [manifest] [-t|--target TARGET]
+```
 
 | Code | Meaning |
 |---:|---|
@@ -108,8 +134,7 @@ mutate its caller's environment.
 | 2 | Schema/value validation failure |
 | 3 | Backend or platform-driver failure |
 
-Diagnostics must not include secret values. `run`, `inspect`, and `export`
-accept exactly one profile. `run` injects resolved values only into its
-child process and propagates the child's exit status; unrelated parent
-environment variables remain inherited. Shell exports and
-`--reveal` are explicit plaintext exposure surfaces.
+Diagnostics must not include secret values. `run` injects resolved values
+only into its child process and propagates the child's exit status; unrelated
+parent environment variables remain inherited. Shell exports and `--reveal`
+are explicit plaintext exposure surfaces.

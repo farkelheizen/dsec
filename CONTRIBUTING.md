@@ -32,8 +32,8 @@ when macOS or `kch` is unavailable.
   changes.
 - Preserve `dsec/v1` syntax, precedence, masking, and exit codes. Add
   portable fixtures when changing manifest behavior.
-- Validate all inputs before side effects. Keep profile writes atomic and
-  permission-conscious; surface evar storage failures explicitly.
+- Validate all inputs, including target substitution, before backend side
+  effects. Surface evar storage failures explicitly.
 - Use synthetic test values only. Never put real credentials, personal
   configuration, or secrets in source, fixtures, docs, logs, or test output.
 - Keep `docs_local/` private and untracked. Check `git status` before staging.

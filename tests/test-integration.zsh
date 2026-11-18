@@ -53,7 +53,6 @@ EOF
 chmod +x "$TMP/bin/security"
 
 export DSEC_TEST_KEYCHAIN=$KEYCHAIN
-export DSEC_HOME="$TMP/home/dsec"
 export EVAR_HOME="$TMP/home/evar"
 export PATH="$TMP/bin:${KCH_BIN:h}:$PATH"
 export KCH_BIN
@@ -66,12 +65,12 @@ print -rn -- 'synthetic-keychain-value' | "$KCH_BIN" add isolated-dsec-test-secr
   print -u2 -r -- 'not ok - could not seed the isolated Keychain'
   exit 1
 }
-"$ROOT/dsec" init isolated "$TMP/secret.dsec" >/dev/null 2>&1 || {
+"$ROOT/dsec" init "$TMP/secret.dsec" >/dev/null 2>&1 || {
   print -u2 -r -- 'not ok - dsec could not resolve the isolated Keychain secret'
   exit 1
 }
 
-inspect=$("$ROOT/dsec" inspect isolated --check 2>&1) || {
+inspect=$("$ROOT/dsec" inspect "$TMP/secret.dsec" --check 2>&1) || {
   print -u2 -r -- 'not ok - dsec inspect failed for the isolated Keychain profile'
   exit 1
 }
@@ -80,7 +79,7 @@ inspect=$("$ROOT/dsec" inspect isolated --check 2>&1) || {
   exit 1
 }
 
-"$ROOT/dsec" set isolated DSEC_TEST_SECRET updated-synthetic-value >/dev/null 2>&1 || {
+"$ROOT/dsec" set "$TMP/secret.dsec" DSEC_TEST_SECRET updated-synthetic-value >/dev/null 2>&1 || {
   print -u2 -r -- 'not ok - dsec set failed for the isolated Keychain secret'
   exit 1
 }

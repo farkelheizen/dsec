@@ -1,5 +1,5 @@
 typeset -g _DSEC_BIN=${DSEC_BIN:-${${(%):-%N}:A:h}/dsec}
-typeset -ga _DSEC_LOADED_VARS _DSEC_ACTIVE_PROFILES
+typeset -ga _DSEC_LOADED_VARS
 typeset -gA _DSEC_PREVIOUS_VALUES _DSEC_PREVIOUS_PRESENT _DSEC_PREVIOUS_EXPORTED
 
 dsec() {
@@ -7,13 +7,9 @@ dsec() {
   (( $# )) && shift
   case $command_name in
     load)
-      (( $# == 1 )) || { print -u2 -r -- 'dsec: load requires exactly one profile'; return 1; }
       local exports status=0 name
       exports=$("$_DSEC_BIN" export "$@") || status=$?
       (( status == 0 )) || return "$status"
-      local -a names profiles
-      names=()
-      profiles=("$@")
       while IFS= read -r name; do
         [[ $name =~ '^export[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)=' ]] || continue
         name=${match[1]}
@@ -29,7 +25,6 @@ dsec() {
         fi
       done <<< "$exports"
       eval "$exports" || return $?
-      _DSEC_ACTIVE_PROFILES=("${_DSEC_ACTIVE_PROFILES[@]}" "${profiles[@]}")
       ;;
     unload|clear)
       local name
@@ -46,7 +41,6 @@ dsec() {
         fi
       done
       _DSEC_LOADED_VARS=()
-      _DSEC_ACTIVE_PROFILES=()
       _DSEC_PREVIOUS_VALUES=()
       _DSEC_PREVIOUS_PRESENT=()
       _DSEC_PREVIOUS_EXPORTED=()

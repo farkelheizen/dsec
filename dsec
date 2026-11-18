@@ -4,28 +4,23 @@ emulate -L zsh
 setopt extendedglob pipefail
 unsetopt err_exit
 
-readonly DSEC_VERSION=0.1.2
+readonly DSEC_VERSION=0.1.3
 readonly DSEC_SCHEMA=dsec/v1
 readonly DSEC_US=$'\x1f'
 
-typeset -g DSEC_HOME_ROOT DSEC_PROFILES_DIR DSEC_TEMPLATES_DIR
 typeset -ga REC_KIND REC_F1 REC_F2 REC_F3 REC_F4 REC_F5 REC_F6 REC_LINE
 typeset -ga NOTE_TEXT
 typeset -ga DSEC_TEMP_FILES
-typeset -gA META TEMPLATE_VARS VAL_MAP SRC_MAP SHADOW_MAP
+typeset -ga MANIFEST_LINES
+typeset -gA VAL_MAP SRC_MAP SHADOW_MAP
 typeset -gA SECRET_FLAG TYPE_MAP DECL_KIND DECL_SCOPE DECL_ALIAS DECL_TYPE DECL_DESC
 typeset -gA FILE_DECL_KIND FILE_DECL_SCOPE FILE_DECL_ALIAS FILE_DECL_TYPE FILE_DECL_DESC
-typeset -gA PARSED_VARS
-typeset -gA EXPLICIT_VARS USED_NAMES ORIGINAL_SOURCE
+typeset -gA USED_NAMES
 typeset -g STRICT_REQUIRED=0 SOURCE_SCOPE=''
-typeset -gA DSEC_PARENT_VALUES DSEC_LOADED_VALUES
-typeset -ga DSEC_LOADED_NAMES
-
-DSEC_HOME_ROOT=${DSEC_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/dsec}
-[[ $DSEC_HOME_ROOT == /* ]] || DSEC_HOME_ROOT="$PWD/$DSEC_HOME_ROOT"
-DSEC_HOME_ROOT=${DSEC_HOME_ROOT:A}
-DSEC_PROFILES_DIR="$DSEC_HOME_ROOT/profiles"
-DSEC_TEMPLATES_DIR="$DSEC_HOME_ROOT/templates"
+typeset -g MANIFEST_PATH='./.dsec'
+typeset -g ARG_MANIFEST ARG_TARGET ARG_TARGET_SET
+typeset -ga ARG_POSITIONALS
+typeset -gA ARG_FLAGS
 
 fail() {
   local exit_code=$1
@@ -43,53 +38,116 @@ usage() {
 Usage: dsec [--version|-V] <command> [arguments]
 
 Commands:
-  init <profile> [source|-] [--env ENV] [--var KEY=VALUE ...] [--force]
-  inspect <profile> [--check] [--reveal]
-  set <profile> <ENV_VAR> [value]
-  run <profile> -- <command> [args...]
-  load <profile>                    Use the sourced wrapper or eval dsec export
+  init [manifest|-] [-t|--target TARGET]
+  inspect [manifest] [-t|--target TARGET] [--check] [--reveal]
+  set [manifest] [-t|--target TARGET] <ENV_VAR> [value]
+  run [manifest] [-t|--target TARGET] -- <command> [args...]
+  load [manifest] [-t|--target TARGET]
   unload | clear                    Unset values tracked by the wrapper
-  export <profile>                  Print shell-quoted export statements
-  export-template <profile>         Print a value-free shareable template
-  docs | render <profile>           Generate a Markdown documentation block
+  export [manifest] [-t|--target TARGET]
+                                    Print shell-quoted export statements
+  docs | render [manifest] [-t|--target TARGET]
+                                    Generate a Markdown documentation block
   completions                       Print Zsh completion code
   help                              Show this help
 
-Profiles are stored in ${DSEC_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/dsec}.
+The default manifest is ./.dsec. {{TARGET}} requires -t/--target, and a
+target is rejected when the manifest has no {{TARGET}} token.
 Non-secret variables use evar; source scopes do not import undeclared names.
-Run 'dsec help' for command details. Secrets are masked unless --reveal is used.
+Secrets are masked unless --reveal is used.
 EOF
 }
 
 version() { print -r -- "dsec $DSEC_VERSION" }
 
-valid_id() {
-  [[ $1 =~ '^[A-Za-z0-9._-]+$' && $1 != . && $1 != .. ]]
-}
-
 valid_env() {
   [[ $1 =~ '^[A-Za-z_][A-Za-z0-9_]*$' && $1 != _ && $1 != SHLVL ]]
-}
-
-ensure_private_dir() {
-  local directory=$1
-  if [[ -e $directory && ( ! -d $directory || -L $directory ) ]]; then
-    fail 1 "refusing unsafe directory: $directory"
-  fi
-  (umask 077; /bin/mkdir -p "$directory") || fail 3 "could not create directory: $directory"
-  [[ ! -L $directory && -d $directory ]] || fail 1 "refusing unsafe directory: $directory"
-  /bin/chmod 700 "$directory" || fail 3 "could not secure directory: $directory"
-}
-
-profile_path() {
-  valid_id "$1" || fail 1 "invalid profile ID: $1"
-  REPLY="$DSEC_PROFILES_DIR/$1.dsec"
 }
 
 validate_regular_file() {
   local file_path=$1 label=$2
   [[ ! -L $file_path && -f $file_path && -r $file_path ]] ||
     fail 1 "$label is missing, unreadable, symlinked, or not a regular file"
+}
+
+valid_target() {
+  [[ $1 =~ '^[a-z0-9][a-z0-9_-]*$' ]]
+}
+
+parse_manifest_args() {
+  local allowed_flags=$1 arg
+  shift
+  ARG_MANIFEST='./.dsec'
+  ARG_TARGET='' ARG_TARGET_SET=0
+  ARG_POSITIONALS=()
+  ARG_FLAGS=()
+  while (( $# )); do
+    arg=$1
+    case $arg in
+      -t|--target)
+        (( ARG_TARGET_SET == 0 )) || fail 1 "target may be specified only once"
+        (( $# >= 2 )) || fail 1 "$arg requires a target"
+        valid_target "$2" || fail 1 "invalid target '$2'"
+        ARG_TARGET=$2 ARG_TARGET_SET=1
+        shift 2
+        ;;
+      -)
+        ARG_POSITIONALS+=("$arg")
+        shift
+        ;;
+      -*)
+        if [[ " $allowed_flags " == *" $arg "* ]]; then
+          ARG_FLAGS[$arg]=1
+          shift
+        else
+          fail 1 "unknown option '$arg'"
+        fi
+        ;;
+      *)
+        ARG_POSITIONALS+=("$arg")
+        shift
+        ;;
+    esac
+  done
+}
+
+select_manifest_path() {
+  local -a paths
+  paths=("$@")
+  (( ${#paths} <= 1 )) || fail 1 "accepts at most one manifest path"
+  (( ${#paths} == 0 )) || ARG_MANIFEST=${paths[1]}
+}
+
+load_manifest() {
+  local path=$1 target_set=$2 target=$3 allow_stdin=${4:-0} content
+  MANIFEST_PATH=$path
+  if [[ $path == - ]]; then
+    (( allow_stdin )) || fail 1 "stdin manifests are supported only by init"
+    content=$(/bin/cat) || fail 1 "could not read manifest from stdin"
+  else
+    validate_regular_file "$path" "manifest"
+    content=$(<"$path") || fail 1 "could not read manifest"
+  fi
+  substitute_target "$content" "$target_set" "$target"
+  content=$REPLY
+  MANIFEST_LINES=("${(@f)content}")
+  parse_manifest
+}
+
+substitute_target() {
+  local remaining=$1 target_set=$2 target=$3 result='' token prefix suffix found=0
+  while [[ $remaining =~ '^([^{}]*)\{\{([^{}]*)\}\}(.*)$' ]]; do
+    prefix=${match[1]} token=${match[2]} suffix=${match[3]}
+    [[ $token == TARGET ]] || fail 1 "unsupported manifest placeholder"
+    (( target_set )) || fail 1 "manifest uses {{TARGET}}; specify -t or --target"
+    result+="$prefix$target"
+    remaining=$suffix
+    found=1
+  done
+  [[ $remaining != *'{{'* && $remaining != *'}}'* ]] ||
+    fail 1 "malformed manifest placeholder"
+  (( found || ! target_set )) || fail 1 "target was supplied but manifest has no {{TARGET}} token"
+  REPLY="$result$remaining"
 }
 
 trim_horizontal() {
@@ -143,26 +201,22 @@ typeset -ga FIELDS
 reset_manifest() {
   REC_KIND=() REC_F1=() REC_F2=() REC_F3=() REC_F4=() REC_F5=() REC_F6=() REC_LINE=()
   NOTE_TEXT=()
-  META=()
   FILE_DECL_KIND=() FILE_DECL_SCOPE=() FILE_DECL_ALIAS=() FILE_DECL_TYPE=() FILE_DECL_DESC=()
-  PARSED_VARS=()
 }
 
 parse_manifest() {
-  local file_path=$1 line line_no=0 key value kind field_count i seen_source=0
+  local file_path=$MANIFEST_PATH line line_no=0 kind field_count i seen_source=0 seen_schema=0 schema=''
   reset_manifest
   SOURCE_SCOPE=''
-  while IFS= read -r line || [[ -n $line ]]; do
+  for line in "${MANIFEST_LINES[@]}"; do
     (( line_no++ ))
     [[ $line != *$'\r'* ]] || fail 1 "$file_path:$line_no: carriage returns are not supported"
     [[ $line != *$'\0'* ]] || fail 1 "$file_path:$line_no: NUL bytes are not supported"
     [[ $line == [[:space:]]# || -z ${line//[ $'\t']/} ]] && continue
     if [[ $line =~ '^[[:space:]]*#' ]]; then
-      if [[ $line =~ '^[[:space:]]*#[[:space:]]*@([A-Za-z_][A-Za-z0-9_]*):[[:space:]]*(.*)$' ]]; then
-        key=${match[1]} value=${match[2]}
-        [[ $key == source64 ]] && continue
-        [[ ! ${+META[$key]} -eq 1 ]] || fail 1 "$file_path:$line_no: duplicate metadata key '$key'"
-        META[$key]=$value
+      if [[ $line =~ '^[[:space:]]*#[[:space:]]*@schema:[[:space:]]*(.*)$' ]]; then
+        (( ! seen_schema )) || fail 1 "$file_path:$line_no: duplicate schema header"
+        seen_schema=1 schema=${match[1]}
       fi
       continue
     fi
@@ -223,26 +277,14 @@ parse_manifest() {
         fail 1 "$file_path:$line_no: unknown directive '$FIELDS[1]'"
         ;;
     esac
-  done < "$file_path"
+  done
   for (( i = 1; i <= ${#REC_KIND}; i++ )); do
     if [[ ${REC_KIND[i]} == var && -z ${REC_F3[i]} && -z $SOURCE_SCOPE ]]; then
       fail 1 "$file_path:${REC_LINE[i]}: empty var scope requires a source directive"
     fi
   done
-  [[ ${META[schema]-} == $DSEC_SCHEMA ]] || fail 1 "$file_path: unsupported or missing schema"
-  if (( ${+META[id]} )); then
-    valid_id "${META[id]}" || fail 1 "$file_path: invalid @id metadata"
-  fi
-  if (( ${+META[template_id]} )); then
-    valid_id "${META[template_id]}" || fail 1 "$file_path: invalid @template_id metadata"
-  fi
-  if (( ${+META[spawned_at]} )); then
-    [[ ${META[spawned_at]} =~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' ]] ||
-      fail 1 "$file_path: invalid @spawned_at metadata"
-  fi
-  if (( ${+META[vars]} )); then
-    parse_vars_metadata "${META[vars]}" || fail 1 "$file_path: malformed @vars metadata"
-  fi
+  (( seen_schema )) && [[ $schema == $DSEC_SCHEMA ]] ||
+    fail 1 "$file_path: unsupported or missing schema"
 }
 
 valid_scope() {
@@ -275,37 +317,6 @@ normalize_scope() {
   REPLY=$1
   [[ ${1//[^\/]/} == / ]] && REPLY+=/_
   return 0
-}
-
-parse_vars_metadata() {
-  local encoded=$1 key='' value='' in_value=0 escaped=0 char i
-  PARSED_VARS=()
-  [[ -z $encoded ]] && return 0
-  for (( i = 1; i <= ${#encoded}; i++ )); do
-    char=${encoded[i]}
-    if (( escaped )); then
-      [[ $char == '\' || $char == ',' || $char == '=' || $char == '|' ]] || return 1
-      if (( in_value )); then value+=$char; else key+=$char; fi
-      escaped=0
-    elif [[ $char == '\' ]]; then
-      escaped=1
-    elif [[ $char == '=' ]] && (( ! in_value )); then
-      in_value=1
-    elif [[ $char == ',' ]]; then
-      [[ $in_value == 1 && $key =~ '^[A-Za-z_][A-Za-z0-9_]*$' ]] || return 1
-      (( ! ${+PARSED_VARS[$key]} )) || return 1
-      PARSED_VARS[$key]=$value
-      key='' value='' in_value=0
-    elif (( in_value )); then
-      value+=$char
-    else
-      key+=$char
-    fi
-  done
-  (( ! escaped )) || return 1
-  [[ $in_value == 1 && $key =~ '^[A-Za-z_][A-Za-z0-9_]*$' ]] || return 1
-  (( ! ${+PARSED_VARS[$key]} )) || return 1
-  PARSED_VARS[$key]=$value
 }
 
 valid_type() {
@@ -605,9 +616,8 @@ unset_value() {
   USED_NAMES[$key]=1
 }
 
-resolve_one_profile() {
-  local profile=$1 file_path=$2 i phase kind name scope alias value type mode
-  parse_manifest "$file_path"
+resolve_manifest() {
+  local manifest=$1 i phase kind name scope alias value type mode
   for (( phase = 1; phase <= 3; phase++ )); do
     for (( i = 1; i <= ${#REC_KIND}; i++ )); do
       kind=${REC_KIND[i]}
@@ -635,8 +645,8 @@ resolve_one_profile() {
             fail 2 "default for '$name' does not satisfy type '$type'"
           fi
           if [[ -z $value && $type != *\? && $STRICT_REQUIRED == 1 ]]; then fail 2 "required variable '$name' is missing"; fi
-          if [[ -n $value ]]; then set_value "$name" "$value" "$profile/var:$scope" 0 "$type"
-          else unset_value "$name" "$profile/var:$scope" 0 "$type"
+          if [[ -n $value ]]; then set_value "$name" "$value" "$manifest/var:$scope" 0 "$type"
+          else unset_value "$name" "$manifest/var:$scope" 0 "$type"
           fi
           ;;
         2:secret)
@@ -650,12 +660,12 @@ resolve_one_profile() {
             fail 2 "stored secret for '$name' does not satisfy type '$type'"
           fi
           if [[ -z $value && $type != *\? && $STRICT_REQUIRED == 1 ]]; then fail 2 "required secret '$name' is missing"; fi
-          if [[ -n $value ]]; then set_value "$name" "$value" "$profile/secret:$alias" 1 "$type"
-          else unset_value "$name" "$profile/secret:$alias" 1 "$type"
+          if [[ -n $value ]]; then set_value "$name" "$value" "$manifest/secret:$alias" 1 "$type"
+          else unset_value "$name" "$manifest/secret:$alias" 1 "$type"
           fi
           ;;
         3:const)
-          set_value "${REC_F1[i]}" "${REC_F2[i]}" "$profile/const" 0 ''
+          set_value "${REC_F1[i]}" "${REC_F2[i]}" "$manifest/const" 0 ''
           DECL_KIND[${REC_F1[i]}]=const DECL_DESC[${REC_F1[i]}]=${REC_F3[i]}
           ;;
       esac
@@ -663,21 +673,13 @@ resolve_one_profile() {
   done
 }
 
-parse_profiles_and_resolve() {
-  (( $# == 1 )) || fail 1 "exactly one profile is required"
-  local profile=$1 file_path
+parse_manifest_and_resolve() {
+  (( $# == 3 )) || fail 1 "internal manifest argument error"
+  local manifest=$1 target_set=$2 target=$3
   VAL_MAP=() SRC_MAP=() SHADOW_MAP=() SECRET_FLAG=() TYPE_MAP=() USED_NAMES=()
   DECL_KIND=() DECL_SCOPE=() DECL_ALIAS=() DECL_TYPE=() DECL_DESC=()
-  profile_path "$profile"; file_path=$REPLY
-  validate_regular_file "$file_path" "profile '$profile'"
-  resolve_one_profile "$profile" "$file_path"
-}
-
-profile_notes() {
-  local profile=$1 file_path=$2
-  parse_manifest "$file_path"
-  local note
-  for note in "${NOTE_TEXT[@]}"; do print -r -- "  $note"; done
+  load_manifest "$manifest" "$target_set" "$target"
+  resolve_manifest "$manifest"
 }
 
 check_resolved() {
@@ -705,32 +707,27 @@ print_shell_exports() {
 }
 
 cmd_export() {
-  local arg
-  (( $# >= 1 )) || fail 1 "export requires exactly one profile"
-  for arg in "$@"; do
-    [[ $arg == -* ]] && fail 1 "unknown export option '$arg'"
-  done
-  (( $# == 1 )) || fail 1 "export accepts exactly one profile"
-  parse_profiles_and_resolve "$1"
+  parse_manifest_args '' "$@"
+  select_manifest_path "${ARG_POSITIONALS[@]}"
+  parse_manifest_and_resolve "$ARG_MANIFEST" "$ARG_TARGET_SET" "$ARG_TARGET"
   check_resolved
   print_shell_exports
 }
 
 cmd_run() {
-  local -a profiles command_args
-  profiles=()
+  local -a arguments command_args
+  arguments=()
   while (( $# )) && [[ $1 != -- ]]; do
-    case $1 in
-      -*) fail 1 "unknown run option '$1'" ;;
-      *) profiles+=("$1"); shift ;;
-    esac
+    arguments+=("$1")
+    shift
   done
-  (( ${#profiles} == 1 )) || fail 1 "run accepts exactly one profile"
   (( $# > 0 )) || fail 1 "run requires '--' before the command"
   shift
   (( $# > 0 )) || fail 1 "run requires a command after '--'"
   command_args=("$@")
-  parse_profiles_and_resolve "$profiles[1]"
+  parse_manifest_args '' "${arguments[@]}"
+  select_manifest_path "${ARG_POSITIONALS[@]}"
+  parse_manifest_and_resolve "$ARG_MANIFEST" "$ARG_TARGET_SET" "$ARG_TARGET"
   check_resolved
   local -a env_args
   env_args=()
@@ -742,27 +739,16 @@ cmd_run() {
 }
 
 cmd_inspect() {
-  local reveal=0 check=0
-  local -a profiles
-  local profile file_path key shown type source shadow item_status
-  profiles=()
-  while (( $# )); do
-    case $1 in
-      --reveal) reveal=1 ;;
-      --check) check=1 ;;
-      -*) fail 1 "unknown inspect option '$1'" ;;
-      *) profiles+=("$1") ;;
-    esac
-    shift
-  done
-  (( ${#profiles} == 1 )) || fail 1 "inspect accepts exactly one profile"
-  profile=${profiles[1]}
+  local reveal=0 check=0 key shown type source shadow item_status note
+  parse_manifest_args '--check --reveal' "$@"
+  select_manifest_path "${ARG_POSITIONALS[@]}"
+  (( ${+ARG_FLAGS[--reveal]} )) && reveal=1
+  (( ${+ARG_FLAGS[--check]} )) && check=1
   STRICT_REQUIRED=$check
-  parse_profiles_and_resolve "$profile"
+  parse_manifest_and_resolve "$ARG_MANIFEST" "$ARG_TARGET_SET" "$ARG_TARGET"
   if (( check )); then check_resolved; fi
-  print -r -- "Profile: $profile"
-  profile_path "$profile"; file_path=$REPLY
-  profile_notes "$profile" "$file_path"
+  print -r -- "Manifest: $MANIFEST_PATH"
+  for note in "${NOTE_TEXT[@]}"; do print -r -- "  $note"; done
   print -r -- ''
   printf '%-28s %-22s %-24s %-38s %s\n' 'EXPORTED VARIABLE' 'TYPE' 'EFFECTIVE VALUE' 'SOURCE / SHADOWS' 'STATUS'
   for key in ${(ok)USED_NAMES}; do
@@ -781,24 +767,29 @@ cmd_inspect() {
 }
 
 cmd_set() {
-  (( $# >= 2 )) || fail 1 "set requires <profile> <ENV_VAR> [value]"
-  local profile=$1 key=$2; shift 2
-  local value='' routing='' alias='' scope='' secret_flag=0
-  while (( $# )); do
-    case $1 in
-      -*) fail 1 "unknown set option '$1'" ;;
-      *)
-        [[ -z $value ]] || fail 1 "set accepts at most one value"
-        value=$1; routing=value; shift
-        ;;
-    esac
-  done
+  parse_manifest_args '' "$@"
+  (( ${#ARG_POSITIONALS} >= 1 && ${#ARG_POSITIONALS} <= 3 )) ||
+    fail 1 "set requires [manifest] <ENV_VAR> [value]"
+  local manifest='./.dsec' key value='' value_set=0 first second
+  if (( ${#ARG_POSITIONALS} == 3 )); then
+    manifest=${ARG_POSITIONALS[1]} key=${ARG_POSITIONALS[2]}
+    value=${ARG_POSITIONALS[3]} value_set=1
+  elif (( ${#ARG_POSITIONALS} == 2 )); then
+    first=${ARG_POSITIONALS[1]} second=${ARG_POSITIONALS[2]}
+    if [[ -e $first || $first == - || $first == *.dsec || $first == */* ]] ||
+       { ! valid_env "$first" && valid_env "$second"; }; then
+      manifest=$first key=$second
+    else
+      key=$first value=$second value_set=1
+    fi
+  else
+    key=${ARG_POSITIONALS[1]}
+  fi
   valid_env "$key" || fail 1 "invalid environment variable '$key'"
-  profile_path "$profile"; local file_path=$REPLY
-  validate_regular_file "$file_path" "profile '$profile'"
-  parse_manifest "$file_path"
+  load_manifest "$manifest" "$ARG_TARGET_SET" "$ARG_TARGET"
   local kind=${FILE_DECL_KIND[$key]-} type=${FILE_DECL_TYPE[$key]-}
   [[ -n $kind ]] || fail 2 "undeclared variable '$key'; add a var or secret declaration first"
+  local alias='' scope='' secret_flag=0
   case $kind in
     var) scope=${FILE_DECL_SCOPE[$key]:-$SOURCE_SCOPE} ;;
     secret) alias=${FILE_DECL_ALIAS[$key]} secret_flag=1 ;;
@@ -809,7 +800,7 @@ cmd_set() {
     [[ $alias != *$'\n'* && $alias != *$'\r'* && $alias != *'|'* ]] ||
       fail 1 "secret alias must be a single-line value without pipes"
   fi
-  if [[ -z $routing ]]; then
+  if (( ! value_set )); then
     read_input_value "$type" "$key" "$secret_flag" || fail 2 "a value is required when input is not interactive"
     value=$REPLY
   fi
@@ -818,83 +809,6 @@ cmd_set() {
   else driver_var_set "$scope" "$key" "$value"
   fi
   print -r -- "Set $key"
-}
-
-compute_sha() {
-  local file_path=$1 line kind
-  local -a structural
-  structural=()
-  while IFS= read -r line || [[ -n $line ]]; do
-    [[ $line =~ '^[[:space:]]*#' || -z ${line//[ $'\t']/} ]] && continue
-    split_fields "$line" || fail 1 "cannot hash malformed manifest"
-    kind=${(L)FIELDS[1]}
-    [[ $kind == note ]] && continue
-    case $kind in
-      var|source) structural+=("${(j:|:)FIELDS[1,4]}") ;;
-      secret) structural+=("${(j:|:)FIELDS[1,4]}") ;;
-      const) structural+=("${(j:|:)FIELDS[1,3]}") ;;
-    esac
-  done < "$file_path"
-  printf '%s\n' "${structural[@]}" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'
-}
-
-encode_b64() {
-  REPLY=$(print -rn -- "$1" | /usr/bin/base64 | /usr/bin/tr -d '\n')
-}
-
-decode_b64() {
-  REPLY=$(print -rn -- "$1" | /usr/bin/base64 -D 2>/dev/null) || return 1
-}
-
-encode_vars() {
-  local key value encoded='' c
-  for key in ${(ok)TEMPLATE_VARS}; do
-    value=${TEMPLATE_VARS[$key]}
-    value=${value//\\/\\\\}; value=${value//,/\\,}; value=${value//=/\\=}; value=${value//|/\\|}
-    [[ -n $encoded ]] && encoded+=,
-    encoded+="$key=$value"
-  done
-  REPLY=$encoded
-}
-
-escape_manifest_value() {
-  local value=$1 escaped='' char i
-  for (( i = 1; i <= ${#value}; i++ )); do
-    char=${value[i]}
-    [[ $char == '|' ]] && escaped+='\'
-    escaped+=$char
-  done
-  REPLY=$escaped
-}
-
-init_substitute_line() {
-  local line=$1 result='' remainder=$1 key prefix suffix
-  REPLY=''
-  while [[ $remainder =~ '^([^{}]*)\{\{([A-Za-z_][A-Za-z0-9_]*)(:[a-z]+)?\}\}(.*)$' ]]; do
-    prefix=${match[1]} key=${match[2]} suffix=${match[4]}
-    result+=$prefix
-    if (( ${+TEMPLATE_VARS[$key]} )); then
-      escape_manifest_value "${TEMPLATE_VARS[$key]}"
-      result+=$REPLY
-    else
-      prompt_value "$key" str '' 0
-      TEMPLATE_VARS[$key]=$REPLY
-      escape_manifest_value "$REPLY"
-      result+=$REPLY
-    fi
-    remainder=$suffix
-  done
-  REPLY="$result$remainder"
-}
-
-atomic_write_profile() {
-  local file_path=$1 content=$2 parent=${1:h} tmp
-  ensure_private_dir "$parent"
-  [[ ! -L $file_path ]] || fail 1 "refusing symlinked profile destination"
-  tmp=$(/usr/bin/mktemp "$parent/.dsec-init.XXXXXX") || fail 3 "could not create temporary profile"
-  print -rn -- "$content" > "$tmp" || { /bin/rm -f "$tmp"; fail 3 "could not write temporary profile"; }
-  /bin/chmod 600 "$tmp" && /bin/mv -f "$tmp" "$file_path" ||
-    { /bin/rm -f "$tmp"; fail 3 "could not save profile"; }
 }
 
 preflight_init_backends() {
@@ -921,225 +835,61 @@ preflight_init_backends() {
 }
 
 cmd_init() {
-  (( $# >= 1 )) || fail 1 "init requires a profile ID"
-  TEMPLATE_VARS=() EXPLICIT_VARS=()
-  local profile=$1 source='' source_profile='' force=0 arg source_is_existing=0 line transformed content='' template_id sha now profile_file
-  shift
-  profile_path "$profile"; profile_file=$REPLY
-  while (( $# )); do
-    case $1 in
-      --env)
-        (( $# >= 2 )) || fail 1 "--env requires a value"
-        [[ $2 != *$'\n'* && $2 != *$'\r'* ]] || fail 1 "template values must be single-line"
-        TEMPLATE_VARS[ENV]=$2 EXPLICIT_VARS[ENV]=1; shift 2
-        ;;
-      --var)
-        (( $# >= 2 )) && [[ $2 == *=* ]] || fail 1 "--var requires KEY=VALUE"
-        arg=$2; [[ ${arg%%=*} =~ '^[A-Za-z_][A-Za-z0-9_]*$' ]] || fail 1 "invalid template variable"
-        [[ ${arg#*=} != *$'\n'* && ${arg#*=} != *$'\r'* ]] || fail 1 "template values must be single-line"
-        TEMPLATE_VARS[${arg%%=*}]=${arg#*=} EXPLICIT_VARS[${arg%%=*}]=1; shift 2
-        ;;
-      --force) force=1; shift ;;
-      -*)
-        fail 1 "unknown init option '$1'"
-        ;;
-      *)
-        [[ -z $source ]] || fail 1 "init accepts only one source"
-        source=$1; shift
-        ;;
-    esac
-  done
-  [[ -n $source ]] || {
-    if [[ -f $profile_file && ! -L $profile_file ]]; then source=$profile_file; source_is_existing=1
-    elif [[ -f ./.dsec && ! -L ./.dsec ]]; then source=./.dsec
-    else fail 1 "no source supplied and neither stored profile nor ./.dsec exists"
-    fi
-  }
-  local src_tmp original_tmp provenance_tmp
-  src_tmp=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/dsec-source.XXXXXX") || fail 3 "could not create source temporary file"
-  DSEC_TEMP_FILES+=("$src_tmp")
-  original_tmp=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/dsec-original.XXXXXX") || { /bin/rm -f "$src_tmp"; fail 3 "could not create source temporary file"; }
-  DSEC_TEMP_FILES+=("$original_tmp")
-  provenance_tmp=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/dsec-provenance.XXXXXX") || { /bin/rm -f "$src_tmp" "$original_tmp"; fail 3 "could not create source temporary file"; }
-  DSEC_TEMP_FILES+=("$provenance_tmp")
-  if (( source_is_existing )) || [[ -n $source_profile ]]; then
-    [[ -n $source_profile ]] || source_profile=$profile
-    local source_profile_file
-    profile_path "$source_profile"; source_profile_file=$REPLY
-    local existing_line existing_key
-    while IFS= read -r existing_line || [[ -n $existing_line ]]; do
-      if [[ $existing_line =~ '^[[:space:]]*#[[:space:]]*@vars:[[:space:]]*(.*)$' ]]; then
-        parse_vars_metadata "${match[1]}" || fail 1 "stored profile has malformed @vars metadata"
-        for existing_key in ${(k)PARSED_VARS}; do
-          (( ${+EXPLICIT_VARS[$existing_key]} )) || TEMPLATE_VARS[$existing_key]=${PARSED_VARS[$existing_key]}
-        done
-      fi
-    done < "$source_profile_file"
-    cmd_export_template "$source_profile" > "$original_tmp" || fail 1 "could not restore the source template"
-  elif [[ $source == - ]]; then
-    /bin/cat > "$original_tmp" || fail 1 "could not read manifest from stdin"
-  elif [[ -f $source ]]; then
-    validate_regular_file "$source" "source manifest"
-    /bin/cat "$source" > "$original_tmp" || fail 1 "could not read source manifest"
-  elif valid_id "$source" && [[ -f "$DSEC_PROFILES_DIR/$source.dsec" && ! -L "$DSEC_PROFILES_DIR/$source.dsec" ]]; then
-    source_profile=$source
-  elif valid_id "$source" && [[ -f "$DSEC_TEMPLATES_DIR/$source.dsec" ]]; then
-    source="$DSEC_TEMPLATES_DIR/$source.dsec"
-    validate_regular_file "$source" "template"
-    /bin/cat "$source" > "$original_tmp" || fail 1 "could not read template"
-  else
-    fail 1 "source '$source' is not a readable manifest file"
-  fi
-  [[ ! -s $original_tmp ]] && fail 1 "source manifest is empty"
-  local source_meta key
-  while IFS= read -r source_meta || [[ -n $source_meta ]]; do
-    if [[ $source_meta =~ '^[[:space:]]*#[[:space:]]*@template_id:[[:space:]]*(.*)$' ]]; then
-      template_id=${match[1]}
-    elif [[ $source_meta =~ '^[[:space:]]*#[[:space:]]*@vars:[[:space:]]*(.*)$' ]]; then
-      parse_vars_metadata "${match[1]}" || fail 1 "source has malformed @vars metadata"
-      for key in ${(k)PARSED_VARS}; do
-        (( ${+EXPLICIT_VARS[$key]} )) || TEMPLATE_VARS[$key]=${PARSED_VARS[$key]}
-      done
-    fi
-  done < "$original_tmp"
-  local source_text
-  source_text=$(/bin/cat "$original_tmp")
-  local source_line
-  while IFS= read -r source_line || [[ -n $source_line ]]; do
-    if [[ $source_line =~ '^[[:space:]]*#[[:space:]]*@template_id:[[:space:]]*(.*)$' ]]; then
-      template_id=${match[1]}
-    fi
-    if [[ $source_line =~ '^[[:space:]]*#[[:space:]]*@(id|spawned_at|vars|source64):' ]]; then
-      continue
-    elif [[ $source_line =~ '^[[:space:]]*#[[:space:]]*@schema:' ]]; then
-      print -r -- "$source_line" >> "$provenance_tmp"
-      print -r -- "$source_line" >> "$src_tmp"
-      continue
-    elif [[ $source_line =~ '^[[:space:]]*#[[:space:]]*@(template_id|template_sha):' ]]; then
-      print -r -- "$source_line" >> "$provenance_tmp"
-      continue
-    fi
-    print -r -- "$source_line" >> "$provenance_tmp"
-    if [[ $source_line =~ '^[[:space:]]*#[[:space:]]*@template_id:[[:space:]]*(.*)$' ]]; then template_id=${match[1]}; fi
-    if [[ $source_line =~ '^[[:space:]]*#' || -z ${source_line//[ $'\t']/} ]]; then
-      transformed=$source_line
-    else
-      init_substitute_line "$source_line"
-      transformed=$REPLY
-    fi
-    print -r -- "$transformed" >> "$src_tmp"
-  done <<< "$source_text"
-  [[ -n $template_id ]] || template_id=$profile
-  if [[ $template_id == *'{{'* ]]; then
-    init_substitute_line "$template_id"
-    template_id=$REPLY
-  fi
-  valid_id "$template_id" || fail 1 "invalid template ID '$template_id'"
-  local generated_text='' generated_line
-  while IFS= read -r generated_line || [[ -n $generated_line ]]; do
-    [[ $generated_line =~ '^[[:space:]]*#[[:space:]]*@schema:' ]] && continue
-    generated_text+="$generated_line"$'\n'
-  done < "$src_tmp"
-  # Validate the fully substituted manifest before creating a profile or touching a backend.
-  local validation_tmp=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/dsec-validate.XXXXXX") || fail 3 "could not create validation temporary file"
-  DSEC_TEMP_FILES+=("$validation_tmp")
-  /bin/cat "$src_tmp" > "$validation_tmp" || fail 3 "could not prepare manifest validation"
-  parse_manifest "$validation_tmp"
+  parse_manifest_args '' "$@"
+  select_manifest_path "${ARG_POSITIONALS[@]}"
+  load_manifest "$ARG_MANIFEST" "$ARG_TARGET_SET" "$ARG_TARGET" 1
   preflight_init_backends
-  [[ $force == 1 || ! -e $profile_file ]] || {
-    # Existing profile re-initialization intentionally replaces the profile only after input is validated.
-    :
-  }
-  sha=$(compute_sha "$provenance_tmp")
-  now=$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ') || fail 3 "could not read system time"
-  encode_vars
-  local vars=$REPLY
-  content="# @schema: $DSEC_SCHEMA"$'\n'"# @id: $profile"$'\n'"# @template_id: $template_id"$'\n'"# @template_sha: $sha"$'\n'"# @spawned_at: $now"$'\n'"# @vars: $vars"$'\n'
-  # Store the exact original manifest line by line so template export restores tokens, not guessed text.
-  local original_line encoded
-  while IFS= read -r original_line || [[ -n $original_line ]]; do
-    encode_b64 "$original_line"; content+="# @source64: $REPLY"$'\n'
-  done < "$provenance_tmp"
-  content+=$generated_text
-  [[ $content == *$'\n' ]] || content+=$'\n'
   local i kind name type scope alias value default
-  STRICT_REQUIRED=0
   for (( i = 1; i <= ${#REC_KIND}; i++ )); do
     kind=${REC_KIND[i]}
     case $kind in
       note) print -r -- "${REC_F1[i]}" ;;
       var)
-        name=${REC_F1[i]} type=${REC_F2[i]} scope=${REC_F3[i]:-$SOURCE_SCOPE} default=${REC_F4[i]}
-        if (( ! force )) && driver_var_get "$scope" "$name" && validate_value "$type" "$REPLY"; then
-          print -r -- "[ok] $name already set ($scope)"
+        name=${REC_F1[i]} type=${REC_F2[i]} scope=${REC_F3[i]:-$SOURCE_SCOPE}
+        default=${REC_F4[i]} value=''
+        if driver_var_get "$scope" "$name"; then
+          value=$REPLY
+          if validate_value "$type" "$value"; then
+            print -r -- "[ok] $name already set ($scope)"
+            continue
+          fi
+          value=''
+        fi
+        if [[ -n $default ]]; then
+          value=$default
+        elif [[ $type != *\? ]]; then
+          prompt_value "$name" "$type" '' 0
+          value=$REPLY
+        else
           continue
         fi
-        prompt_value "$name" "$type" "$default" 0
-        value=$REPLY
-        [[ -z $value && $type == *\? ]] && continue
         driver_var_set "$scope" "$name" "$value"
         print -r -- "[ok] stored $name ($scope)"
         ;;
       secret)
         name=${REC_F1[i]} type=${REC_F2[i]} alias=${REC_F3[i]:-$REC_F1[i]}
-        if (( ! force )) && driver_secret_get "$alias" && validate_value "$type" "$REPLY"; then
-          print -r -- "[ok] $name already set (Keychain)"
-          continue
+        if driver_secret_get "$alias"; then
+          value=$REPLY
+          if validate_value "$type" "$value"; then
+            print -r -- "[ok] $name already set (Keychain)"
+            continue
+          fi
         fi
+        [[ $type != *\? ]] || continue
         prompt_value "$name" "$type" '' 1
         value=$REPLY
-        [[ -z $value && $type == *\? ]] && continue
         driver_secret_set "$alias" "$value"
         print -r -- "[ok] stored $name (Keychain)"
         ;;
     esac
   done
-  atomic_write_profile "$profile_file" "$content"
-  /bin/rm -f "$src_tmp" "$original_tmp" "$provenance_tmp" "$validation_tmp"
-  DSEC_TEMP_FILES=()
-}
-
-cmd_export_template() {
-  (( $# == 1 )) || fail 1 "export-template requires exactly one profile"
-  profile_path "$1"; local file_path=$REPLY
-  validate_regular_file "$file_path" "profile '$1'"
-  local line encoded decoded has_schema=0
-  local -a source_lines fallback_lines
-  source_lines=() fallback_lines=()
-  while IFS= read -r line || [[ -n $line ]]; do
-    if [[ $line == '# @source64: '* ]]; then
-      encoded=${line#'# @source64: '}
-      decode_b64 "$encoded" || fail 1 "profile has invalid source provenance"
-      source_lines+=("$REPLY")
-      [[ $REPLY == '# @schema:'* ]] && has_schema=1
-    elif [[ $line == '# @schema:'* || $line == '# @id:'* || $line == '# @template_id:'* ||
-            $line == '# @template_sha:'* || $line == '# @spawned_at:'* || $line == '# @vars:'* ||
-            $line == '# @token_source:'* ]]; then
-      continue
-    elif [[ $line == '# @source64:'* ]]; then
-      continue
-    else
-      fallback_lines+=("$line")
-      [[ $line == '# @schema:'* ]] && has_schema=1
-    fi
-  done < "$file_path"
-  if (( ${#source_lines} )); then
-    (( has_schema )) || print -r -- "# @schema: $DSEC_SCHEMA"
-    printf '%s\n' "${source_lines[@]}"
-  elif (( ${#fallback_lines} )); then
-    (( has_schema )) || print -r -- "# @schema: $DSEC_SCHEMA"
-    printf '%s\n' "${fallback_lines[@]}"
-  else
-    fail 1 "profile has no template provenance"
-  fi
 }
 
 cmd_docs() {
-  (( $# == 1 )) || fail 1 "docs requires exactly one profile"
-  local profile=$1; profile_path "$profile"; local file_path=$REPLY
-  validate_regular_file "$file_path" "profile '$profile'"
-  parse_manifest "$file_path"
-  print -r -- "## Environment: \`$profile\`"$'\n'
+  parse_manifest_args '' "$@"
+  select_manifest_path "${ARG_POSITIONALS[@]}"
+  load_manifest "$ARG_MANIFEST" "$ARG_TARGET_SET" "$ARG_TARGET"
+  print -r -- "## Manifest: \`$MANIFEST_PATH\`"$'\n'
   local local_note
   for local_note in "${NOTE_TEXT[@]}"; do print -r -- "$local_note"$'\n'; done
   print -r -- "| Variable | Kind | Type | Required | Default | Description |"
@@ -1158,44 +908,34 @@ cmd_docs() {
         ;;
     esac
   done
-  print -r -- "" "Quickstart: \`dsec init $profile\`"
+  local quickstart
+  shell_quote "$MANIFEST_PATH"
+  quickstart="dsec run $REPLY"
+  (( ARG_TARGET_SET )) && quickstart+=" -t $ARG_TARGET"
+  print -r -- "" "Quickstart: \`$quickstart -- <command>\`"
 }
 
 cmd_completions() {
   cat <<'EOF'
 # Load after compinit: eval "$(dsec completions)"
 _dsec() {
-  local -a commands profiles names options
+  local -a commands options
   local separator=0 i
-  commands=(init inspect set run load unload clear export export-template docs render completions help)
-  profiles=(${(f)"$(command dsec __complete_profiles 2>/dev/null)"})
+  commands=(init inspect set run load unload clear export docs render completions help)
   if (( CURRENT == 2 )); then
     compadd -- $commands
     return
   fi
   case ${words[2]} in
-    init)
-      options=(--env --var --force)
-      if [[ ${words[CURRENT-1]} == --env || ${words[CURRENT-1]} == --var ]]; then
-        return
-      elif (( CURRENT == 3 )); then
-        compadd -- $profiles
-      else
-        compadd -- $options
-        _files -g '*.dsec'
-      fi
-      ;;
-    inspect)
-      options=(--check --reveal)
-      compadd -- $profiles $options
+    init|inspect|export|load|docs|render)
+      options=(-t --target)
+      compadd -- $options
+      _files -g '*.dsec'
       ;;
     set)
-      if (( CURRENT == 3 )); then
-        compadd -- $profiles
-      elif (( CURRENT == 4 )); then
-        names=(${(f)"$(command dsec __complete_variables ${words[3]} 2>/dev/null)"})
-        compadd -- $names
-      fi
+      options=(-t --target)
+      compadd -- $options
+      _files -g '*.dsec'
       ;;
     run)
       for (( i = 3; i < CURRENT; i++ )); do
@@ -1205,13 +945,8 @@ _dsec() {
         _normal
         return
       fi
-      compadd -- $profiles
-      ;;
-    load|export)
-      compadd -- $profiles
-      ;;
-    export-template|docs|render)
-      compadd -- $profiles
+      compadd -- -t --target
+      _files -g '*.dsec'
       ;;
     *)
       compadd -- $commands
@@ -1222,19 +957,10 @@ compdef _dsec dsec
 EOF
 }
 
-cmd_complete_profiles() {
-  local file
-  for file in "$DSEC_PROFILES_DIR"/*.dsec(N); do
-    [[ -f $file && ! -L $file ]] || continue
-    print -r -- "${file:t:r}"
-  done
-}
-
 cmd_complete_variables() {
-  (( $# == 1 )) || return 1
-  profile_path "$1"
-  validate_regular_file "$REPLY" "profile '$1'"
-  parse_manifest "$REPLY"
+  parse_manifest_args '' "$@"
+  select_manifest_path "${ARG_POSITIONALS[@]}"
+  load_manifest "$ARG_MANIFEST" "$ARG_TARGET_SET" "$ARG_TARGET"
   local i
   for (( i = 1; i <= ${#REC_KIND}; i++ )); do
     [[ ${REC_KIND[i]} == var || ${REC_KIND[i]} == secret ]] &&
@@ -1243,7 +969,7 @@ cmd_complete_variables() {
 }
 
 cmd_load() {
-  print -u2 -r -- "dsec: load must be invoked through dsec.plugin.zsh or eval \"\$(dsec export ... )\""
+  print -u2 -r -- "dsec: load must be invoked through dsec.plugin.zsh or eval \"\$(dsec export [manifest] [-t TARGET])\""
   return 1
 }
 
@@ -1263,10 +989,8 @@ main() {
     export) cmd_export "$@" ;;
     load) cmd_load "$@" ;;
     unload|clear) print -u2 -r -- "dsec: unload is provided by dsec.plugin.zsh"; return 1 ;;
-    export-template) cmd_export_template "$@" ;;
     docs|render) cmd_docs "$@" ;;
     completions) cmd_completions ;;
-    __complete_profiles) cmd_complete_profiles ;;
     __complete_variables) cmd_complete_variables "$@" ;;
     *) fail 1 "unknown command '$command_name'" ;;
   esac

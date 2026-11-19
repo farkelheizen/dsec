@@ -44,7 +44,7 @@ Check the installed CLI version with:
 dsec --version
 ```
 
-Current release: `dsec 0.1.3`.
+Current release: `dsec 0.1.4`.
 
 ## Manifest
 
@@ -136,6 +136,7 @@ dsec export [manifest] [-t|--target TARGET]
 dsec load [manifest] [-t|--target TARGET]
 dsec unload | clear
 dsec docs [manifest] [-t|--target TARGET]
+dsec targets [manifest]
 dsec completions
 ```
 
@@ -153,6 +154,9 @@ dsec completions
 - `export` prints shell-quoted assignments. This output contains plaintext
   values and should be handled accordingly.
 - `docs`/`render` produces a Markdown environment reference.
+- `targets` lists target history, newest first. With a manifest path it
+  filters to that manifest; without one it lists targets with their manifest
+  paths.
 - `load` and `unload` are wrapper functions, not standalone executable
   behavior. Alternatively, explicitly evaluate trusted export output:
 
@@ -176,6 +180,14 @@ Values can be exposed through filesystem access, command output, child
 environments, and backups. Secrets may be exposed to authorized local
 processes, child processes, the current shell when explicitly loaded, or
 anyone who receives plaintext export output.
+
+Target history is optional local metadata written only by successful
+`init` and validated `run` invocations that specify `-t`/`--target`. It is
+stored in `${XDG_STATE_HOME:-$HOME/.local/state}/dsec/targets.tsv` (directory
+mode `0700`, file mode `0600`) and can be inspected with `dsec targets`.
+Read-only commands do not update it, and a history write failure only emits
+a warning. Entries contain canonical manifest paths, target names, and an
+optional local timestamp; they are not credentials or authorization controls.
 
 See [`SECURITY.md`](SECURITY.md) for the threat model and limitations.
 

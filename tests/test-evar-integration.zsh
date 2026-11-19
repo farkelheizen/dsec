@@ -14,6 +14,7 @@ ROOT=${${(%):-%N}:A:h:h}
 TMP=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/dsec-evar-test.XXXXXX") || exit 1
 trap '/bin/rm -rf -- "$TMP"' EXIT
 export EVAR_HOME="$TMP/registry"
+export XDG_STATE_HOME="$TMP/state"
 mkdir -p "$TMP/bin"
 ln -s "$EVAR_BIN" "$TMP/bin/evar"
 export PATH="$TMP/bin:$PATH"

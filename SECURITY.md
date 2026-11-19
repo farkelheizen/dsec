@@ -19,6 +19,13 @@ is substituted in memory, and dsec does not write profile caches or generated
 manifests. The target is not a security boundary: it selects scopes and
 Keychain aliases, not authorization.
 
+Successful target-bearing `init` and validated `run` commands may record
+canonical manifest paths, target names, and local timestamps in
+`${XDG_STATE_HOME:-$HOME/.local/state}/dsec/targets.tsv`. The directory and
+file are restricted to the user (`0700` and `0600`). This convenience history
+is local metadata, not a credential or authorization control; filesystem
+backups and access to the user's account may expose it.
+
 ## Runtime exposure
 
 `dsec run` passes resolved values to the child process and descendants without

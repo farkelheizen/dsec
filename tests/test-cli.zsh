@@ -8,6 +8,7 @@ TMP=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/dsec-test.XXXXXX") || exit 1
 trap '/bin/rm -rf -- "$TMP"' EXIT
 
 export EVAR_HOME="$TMP/evar"
+export XDG_STATE_HOME="$TMP/state"
 export KCH_MOCK_STORE="$TMP/keychain"
 export EVAR_MOCK_LOG="$TMP/evar.log"
 export PATH="$TMP/bin:$PATH"
@@ -56,8 +57,8 @@ assert_status() {
 contains() { [[ $1 == *"$2"* ]]; }
 not_contains() { [[ $1 != *"$2"* ]]; }
 
-[[ $("$ROOT/dsec" --version) == 'dsec 0.1.3' && $("$ROOT/dsec" -V) == 'dsec 0.1.3' ]]
-assert_status 'both version options report 0.1.3' 0 $?
+[[ $("$ROOT/dsec" --version) == 'dsec 0.1.4' && $("$ROOT/dsec" -V) == 'dsec 0.1.4' ]]
+assert_status 'both version options report 0.1.4' 0 $?
 
 for target in dev test; do
   port=5401
@@ -110,6 +111,65 @@ assert 'run preserves child argument boundaries' contains "$forwarded" 'a b|c;d'
 child_status=0
 "$ROOT/dsec" run "$TMP/main.dsec" -t dev -- /bin/sh -c 'exit 37' >/dev/null 2>&1 || child_status=$?
 assert_status 'run propagates child exit status' 37 "$child_status"
+run_history=$("$ROOT/dsec" targets "$TMP/main.dsec" 2>&1)
+assert 'run records a target even when its child exits nonzero' contains "$run_history" 'dev'
+
+history_manifest="$TMP/history.dsec"
+cat > "$history_manifest" <<'EOF'
+# @schema: dsec/v1
+const | SELECTED_TARGET | {{TARGET}} | Selected target
+EOF
+"$ROOT/dsec" run "$history_manifest" -t first -- /usr/bin/true >/dev/null 2>&1
+assert_status 'run records an explicitly selected target' 0 $?
+"$ROOT/dsec" run "$history_manifest" -t second -- /usr/bin/true >/dev/null 2>&1
+"$ROOT/dsec" run "$history_manifest" -t first -- /usr/bin/true >/dev/null 2>&1
+history_for_manifest=$("$ROOT/dsec" targets "$history_manifest" 2>&1)
+assert_status 'targets lists the manifest history' 0 $?
+history_lines=("${(@f)history_for_manifest}")
+[[ $history_lines[1] == first* && $history_lines[2] == second* && ${#history_lines} == 2 ]]
+assert_status 'target history is most-recent-first and deduplicated' 0 $?
+history_file="$XDG_STATE_HOME/dsec/targets.tsv"
+[[ $(/usr/bin/stat -f %Lp "$history_file") == 600 &&
+   $(/usr/bin/stat -f %Lp "$XDG_STATE_HOME") == 700 &&
+   $(/usr/bin/stat -f %Lp "${history_file:h}") == 700 ]]
+assert_status 'target history uses private file and directory permissions' 0 $?
+all_targets=$("$ROOT/dsec" targets 2>&1)
+assert 'all-target output includes the canonical manifest path' contains "$all_targets" "${history_manifest:A}"
+
+history_before_inspect=$(<"$history_file")
+"$ROOT/dsec" inspect "$history_manifest" -t first >/dev/null 2>&1
+assert_status 'inspect can resolve a target-history manifest' 0 $?
+[[ $(<"$history_file") == "$history_before_inspect" ]]
+assert_status 'inspect does not mutate target history' 0 $?
+
+mkdir -p "$TMP/project with spaces"
+cp "$history_manifest" "$TMP/project with spaces/history.dsec"
+ln -s "$TMP/project with spaces/history.dsec" "$TMP/project/history-link.dsec"
+"$ROOT/dsec" run "$TMP/project with spaces/history.dsec" -t spaced -- /usr/bin/true >/dev/null 2>&1
+spaced_history=$("$ROOT/dsec" targets "$TMP/project/history-link.dsec" 2>&1)
+assert 'target history supports paths with spaces and symlink filtering' contains "$spaced_history" 'spaced'
+
+mkdir -p "$TMP/empty-state/dsec"
+print -r -- "${history_manifest:A}"$'\tmanual\t' > "$TMP/empty-state/dsec/targets.tsv"
+empty_timestamp=$(XDG_STATE_HOME="$TMP/empty-state" "$ROOT/dsec" targets "$history_manifest" 2>&1)
+assert_status 'targets accepts a blank timestamp field' 0 $?
+assert 'blank timestamps print a clean target field' contains "$empty_timestamp" 'manual'
+no_state_output=$(XDG_STATE_HOME="$TMP/no-state" "$ROOT/dsec" targets 2>&1)
+assert_status 'missing target history exits successfully' 0 $?
+[[ -z $no_state_output && ! -e "$TMP/no-state" ]]
+assert_status 'reading missing history does not create state' 0 $?
+relative_state_output=$(cd "$TMP" && XDG_STATE_HOME=relative-state "$ROOT/dsec" run "$history_manifest" -t relative -- /usr/bin/true 2>&1)
+assert_status 'relative XDG state paths do not change run success' 0 $?
+assert 'relative XDG state paths are rejected without repository-local writes' contains "$relative_state_output" 'warning: could not update target history'
+[[ ! -e "$TMP/relative-state" ]]
+assert_status 'invalid relative XDG state home creates no files' 0 $?
+
+print -r -- 'not-a-directory' > "$TMP/state-blocker"
+write_warning=''
+write_status=0
+write_warning=$(XDG_STATE_HOME="$TMP/state-blocker" "$ROOT/dsec" run "$history_manifest" -t no-write -- /usr/bin/true 2>&1) || write_status=$?
+assert_status 'target-history write failure does not fail run' 0 "$write_status"
+assert 'target-history write failure emits a warning' contains "$write_warning" 'warning: could not update target history'
 
 "$ROOT/dsec" set "$TMP/main.dsec" --target dev PORT 6001 >/dev/null 2>&1
 assert_status 'set accepts an explicit manifest and target' 0 $?
@@ -164,6 +224,8 @@ const | TARGET_NAME | {{TARGET}} | Target name
 EOF
 "$ROOT/dsec" init "$init_manifest" -t dev > "$TMP/init.out" 2>&1
 assert_status 'init provisions a target manifest' 0 $?
+init_history=$("$ROOT/dsec" targets "$init_manifest" 2>&1)
+assert 'successful init records its explicit target' contains "$init_history" 'dev'
 [[ $(<"$EVAR_HOME/setup/app/dev/DEFAULTED") == default-value ]]
 assert_status 'init stores declared defaults' 0 $?
 [[ ! -e "$TMP/dsec/profiles" && ! -e "$TMP/dsec/templates" ]]
@@ -190,6 +252,7 @@ completion=$("$ROOT/dsec" completions 2>&1)
 assert 'completion offers manifest commands and omits removed command' contains "$completion" 'docs render'
 assert 'completion no longer includes export-template' not_contains "$completion" 'export-template'
 assert 'completion supports target flags' contains "$completion" '--target'
+assert 'completion offers the targets command' contains "$completion" 'targets'
 printf '%s\n' "$completion" | zsh -n
 assert_status 'generated completion code is valid Zsh' 0 $?
 removed_command=0

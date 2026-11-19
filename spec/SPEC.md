@@ -19,7 +19,7 @@ No profile, template, timestamp, or substitution-provenance metadata is
 written or interpreted. Other comment lines are ignored.
 
 The schema version identifies the manifest format, independently of the CLI
-release version. The format remains `dsec/v1` for CLI 0.1.3; change the schema
+release version. The format remains `dsec/v1` for CLI 0.1.4; change the schema
 only when an incompatible manifest contract change requires it.
 
 The five directives have exact column counts:
@@ -89,7 +89,9 @@ For each invocation:
 reuses valid stored values, writes declared defaults when values are absent,
 and prompts for missing required values. Optional unset values may remain
 unset. Variable values go through evar and secrets through Keychain. No
-profile, cache, or generated manifest is written.
+profile or generated manifest is written. When an explicit target is used,
+successful initialization may update the separate local target-history file
+described below.
 
 `set` rejects undeclared names; values may be written only for manifest
 entries declared as `var` or `secret`. Inspection masks secret-derived values
@@ -112,10 +114,10 @@ plaintext non-secret configuration; it is not a secret store.
 ## CLI and exit codes
 
 The reference CLI provides `init`, `inspect`, `set`, `run`, `export`,
-`docs`/`render`, and completion output. `load`/`unload` are supplied by the
-sourced Zsh wrapper; a standalone executable cannot mutate its caller's
-environment. Each command accepts an optional manifest path and the target
-option when the manifest contains `{{TARGET}}`:
+`docs`/`render`, `targets`, and completion output. `load`/`unload` are
+supplied by the sourced Zsh wrapper; a standalone executable cannot mutate
+its caller's environment. Manifest-consuming commands accept an optional
+manifest path and the target option when the manifest contains `{{TARGET}}`:
 
 ```text
 dsec init [manifest|-] [-t|--target TARGET]
@@ -125,7 +127,18 @@ dsec run [manifest] [-t|--target TARGET] -- <command> [args...]
 dsec export [manifest] [-t|--target TARGET]
 dsec load [manifest] [-t|--target TARGET]
 dsec docs [manifest] [-t|--target TARGET]
+dsec targets [manifest]
 ```
+
+`targets` lists local target history, newest first. With a manifest path it
+filters by that manifest's canonical absolute path; without one it lists each
+target, optional timestamp, and canonical manifest path. It reads
+`${XDG_STATE_HOME:-$HOME/.local/state}/dsec/targets.tsv` without creating or
+modifying it. Successful `init` and validated `run` operations record an
+explicit target best-effort; history write failures warn but do not change
+the command's result. The state directory and file use `0700` and `0600`
+permissions. This local history is convenience metadata, not an authorization
+boundary.
 
 | Code | Meaning |
 |---:|---|
